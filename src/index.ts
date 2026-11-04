@@ -1,0 +1,29 @@
+export * from './contracts/skill-pack-contract'
+export * from './packs/skill-pack-service'
+export * from './packs/skill-pack-preview'
+export {
+  previewDynamicSkillPack,
+  applyDynamicSkillPack,
+  previewSkillPack as previewDynamicPackDiff,
+  type SkillPackDiffFn,
+  type DynamicPackHitEntry,
+  type DynamicPackPreview,
+  type DynamicPackApplyResult
+} from './packs/skill-pack-dynamic'
+export * from './packs/skill-pack-rule-eval'
+export * from './contracts/skill-vault-contract'
+export * from './contracts/skill-enablement'
+export * from './contracts/skill-path-containment'
+export * from './infra/skill-filesystem-retry'
+export type {
+  SkillEnablementFileIO,
+  SkillEnablementScope
+} from './enablement/skill-enablement-applier'
+export * from './vault/skill-vault-paths'
+export * from './vault/skill-vault-scan'
+export * from './vault/skill-vault-adopt'
+export * from './vault/skill-vault-index-service'
+export * from './enablement/skill-enablement-planner'
+export * from './enablement/skill-enablement-applier'
+export * from './enablement/installed-skill-inventory'
+export * from './packs/pack-local-agent-detection'

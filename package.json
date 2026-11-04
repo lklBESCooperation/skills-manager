@@ -1,0 +1,33 @@
+{
+  "name": "@pmstudio/skills-manager",
+  "version": "0.1.0",
+  "files": [
+    "dist"
+  ],
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "orca-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "pnpm build",
+    "test": "vitest run --maxWorkers=2"
+  },
+  "dependencies": {
+    "zod": "~4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.130",
+    "typescript": "^7.0.2",
+    "vitest": "5.0.5"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
