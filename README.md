@@ -23,7 +23,7 @@ skills 域内工具（`renameSkillPathWithWindowsRetry`、`skill-path-containmen
 "@pmstudio/skills-manager": "git+https://github.com/lklBESCooperation/skills-manager.git#v0.1.0"
 ```
 
-pnpm 安装 git 依赖时执行 `prepare` → `pnpm build` 产出 `dist/`，`types`/`main` 均指向 dist。仓库公开后 https 形态免凭据安装；私有期间需要 org 读权限凭据。
+pnpm 安装 git 依赖时执行 `prepare` → `pnpm build` 产出 `dist/`，`types`/`main` 均指向 dist。仓库已公开：https 形态免凭据安装。
 
 若 pnpm ≥12 拦截构建脚本，在消费方 `pnpm-workspace.yaml` 的 `allowBuilds` 里按解析 ID（含 commit SHA）放行。
 `orca-source` export 条件保留给宿主源码编译通道。
