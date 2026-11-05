@@ -1,6 +1,6 @@
 {
   "name": "@pmstudio/skills-manager",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "files": [
     "dist"
   ],
@@ -12,6 +12,26 @@
       "orca-source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./contracts/skill-install-providers": {
+      "types": "./dist/contracts/skill-install-providers.d.ts",
+      "default": "./dist/contracts/skill-install-providers.js"
+    },
+    "./contracts/tui-agent": {
+      "types": "./dist/contracts/tui-agent.d.ts",
+      "default": "./dist/contracts/tui-agent.js"
+    },
+    "./contracts/skill-vault-contract": {
+      "types": "./dist/contracts/skill-vault-contract.d.ts",
+      "default": "./dist/contracts/skill-vault-contract.js"
+    },
+    "./contracts/skill-pack-contract": {
+      "types": "./dist/contracts/skill-pack-contract.d.ts",
+      "default": "./dist/contracts/skill-pack-contract.js"
+    },
+    "./contracts/skill-metadata": {
+      "types": "./dist/contracts/skill-metadata.d.ts",
+      "default": "./dist/contracts/skill-metadata.js"
     }
   },
   "scripts": {
