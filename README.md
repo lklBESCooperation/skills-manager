@@ -16,6 +16,10 @@ skills 域内工具（`renameSkillPathWithWindowsRetry`、`skill-path-containmen
 
 契约不兼容变更（端口签名、schema 版本）必须升 minor 以上并迁移说明。
 
+## 契约 subpath（供宿主 renderer/main 直接消费）
+
+`@pmstudio/skills-manager/contracts/{skill-install-providers,tui-agent,skill-vault-contract,skill-pack-contract,skill-metadata}` 均为纯数据/类型模块，不拖入 node:fs，宿主对应 shared 文件只保留单行 re-export。全部契约测试随包维护（12 文件 / 78 用例）。
+
 ## 消费（git 依赖）
 
 ```jsonc
@@ -32,7 +36,7 @@ pnpm 安装 git 依赖时执行 `prepare` → `pnpm build` 产出 `dist/`，`typ
 
 ```bash
 pnpm install --frozen-lockfile
-pnpm test     # 55 tests
+pnpm test     # 78 tests
 pnpm build    # tsc → dist/
 ```
 
