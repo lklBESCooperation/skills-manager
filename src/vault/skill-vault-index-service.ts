@@ -19,6 +19,18 @@ export async function readSkillVaultIndex(indexPath: string): Promise<SkillVault
   return raw === null ? null : salvageSkillVaultIndex(raw)
 }
 
+/** Reads the symmetric index path first, falling back read-only to the legacy v0.1 path if present. */
+export async function readSkillVaultIndexWithLegacyFallback(
+  indexPath: string,
+  legacyIndexPath?: string
+): Promise<SkillVaultIndex | null> {
+  const primary = await readSkillVaultIndex(indexPath)
+  if (primary !== null || !legacyIndexPath) {
+    return primary
+  }
+  return readSkillVaultIndex(legacyIndexPath)
+}
+
 export async function writeSkillVaultIndex(
   indexPath: string,
   index: SkillVaultIndex

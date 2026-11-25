@@ -1,13 +1,29 @@
 import { z } from 'zod';
+import { type TuiAgent } from './tui-agent';
+export type AgentId = TuiAgent;
 /** Tri-state override: project entries may fall back through `inherit` to the user default. */
 export type SkillOverride = 'inherit' | 'enabled' | 'disabled';
 export type EffectiveSkillState = 'enabled' | 'disabled';
 export type SkillEnablementOrigin = 'user' | 'project';
+export type EffectiveAgentSkillOrigin = SkillEnablementOrigin | 'agent-override' | 'borrowed-lock' | 'unsupported';
+export type EffectiveAgentSkillState = {
+    effective: EffectiveSkillState;
+    origin: EffectiveAgentSkillOrigin;
+    /** Set when an agent borrows a root owned by another enabled agent (e.g. opencode -> claude). */
+    borrowedFrom?: TuiAgent;
+    locked?: boolean;
+};
 export type EffectiveSkillResolution = {
     effective: EffectiveSkillState;
     origin: SkillEnablementOrigin;
+    /** Per-agent boolean matrix (`agents?: Record<AgentId, boolean>`) when resolved at agent granularity. */
+    agents?: Partial<Record<AgentId, boolean>>;
+    /** Detailed per-agent resolution including lock & origin metadata. */
+    agentDetails?: Partial<Record<AgentId, EffectiveAgentSkillState>>;
 };
+export type SkillAgentOverrides = Record<string, Partial<Record<AgentId, boolean>>>;
 export declare const SKILL_ENABLEMENT_SCHEMA_VERSION: 1;
+export declare const SKILL_ENABLEMENT_V2_SCHEMA_VERSION: 2;
 export declare const SKILL_OVERRIDE_VALUES: readonly ['inherit', 'enabled', 'disabled'];
 export declare const SKILL_EFFECTIVE_VALUES: readonly ['enabled', 'disabled'];
 export declare const SkillOverrideSchema: z.ZodEnum<{
@@ -27,10 +43,22 @@ export type SkillProjectOverrides = Record<string, SkillOverride>;
 export type SkillUserDefaultsFileValue = {
     schemaVersion: typeof SKILL_ENABLEMENT_SCHEMA_VERSION;
     defaults: SkillUserDefaults;
+    agentOverrides?: SkillAgentOverrides;
 };
 export type SkillProjectStateFileValue = {
     schemaVersion: typeof SKILL_ENABLEMENT_SCHEMA_VERSION;
     overrides: SkillProjectOverrides;
+    agentOverrides?: SkillAgentOverrides;
+};
+export type SkillUserDefaultsFileV2Value = {
+    schemaVersion: typeof SKILL_ENABLEMENT_V2_SCHEMA_VERSION;
+    defaults: SkillUserDefaults;
+    agentOverrides: SkillAgentOverrides;
+};
+export type SkillProjectStateFileV2Value = {
+    schemaVersion: typeof SKILL_ENABLEMENT_V2_SCHEMA_VERSION;
+    overrides: SkillProjectOverrides;
+    agentOverrides: SkillAgentOverrides;
 };
 export type SkillEnablementSalvage = {
     collectDrops: <T>(parse: () => T) => {
@@ -41,6 +69,7 @@ export type SkillEnablementSalvage = {
 };
 export type SalvagedSkillEnablementFile<T> = {
     value: T;
+    agentOverrides?: SkillAgentOverrides;
     droppedKeys: string[];
     /** Bytes existed but no usable envelope recovered; the file then reads as empty rather than fatal. */
     unreadable: boolean;
@@ -48,15 +77,21 @@ export type SalvagedSkillEnablementFile<T> = {
 export declare function parseSkillUserDefaultsFile(raw: string | null, salvage: SkillEnablementSalvage): SalvagedSkillEnablementFile<SkillUserDefaults>;
 export declare function parseSkillProjectStateFile(raw: string | null, salvage: SkillEnablementSalvage): SalvagedSkillEnablementFile<SkillProjectOverrides>;
 /** Deterministic key order keeps the git-committed project state file diff-stable. */
-export declare function skillUserDefaultsFileValue(defaults: Readonly<SkillUserDefaults>): SkillUserDefaultsFileValue;
-export declare function skillProjectStateFileValue(overrides: Readonly<SkillProjectOverrides>): SkillProjectStateFileValue;
+export declare function skillUserDefaultsFileValue(defaults: Readonly<SkillUserDefaults>, agentOverrides?: SkillAgentOverrides): SkillUserDefaultsFileValue;
+export declare function skillProjectStateFileValue(overrides: Readonly<SkillProjectOverrides>, agentOverrides?: SkillAgentOverrides): SkillProjectStateFileValue;
 /**
  * Final effective state per installed skill: project override wins, `inherit` and absence fall
  * back to the user default, and an absent user default keeps the install-is-enabled default.
- * Keys naming skills outside `installed` are ignored by construction.
+ * When per-agent overrides or `includeAgents` are provided, populates `agents` and `agentDetails`.
  */
 export declare function resolveEffectiveSkills(input: {
     installed: readonly string[];
     userDefaults: Readonly<Record<string, EffectiveSkillState | undefined>>;
     projectOverrides: Readonly<Record<string, SkillOverride | undefined>>;
+    userAgentOverrides?: Readonly<SkillAgentOverrides>;
+    projectAgentOverrides?: Readonly<SkillAgentOverrides>;
+    scope?: 'global' | 'workspace';
+    agents?: readonly AgentId[];
+    includeAgents?: boolean;
 }): Map<string, EffectiveSkillResolution>;
+export declare function isSkillEffectiveForAgent(resolution: EffectiveSkillResolution | undefined, agent: AgentId): boolean;

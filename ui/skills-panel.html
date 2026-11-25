@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Skills Quick Toggle</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 12px;
+        background: transparent;
+        color: inherit;
+        font-size: 13px;
+      }
+      .quick-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .action-btn {
+        padding: 6px 10px;
+        border-radius: 6px;
+        border: 1px solid rgba(99, 102, 241, 0.5);
+        background: rgba(99, 102, 241, 0.14);
+        color: inherit;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .hint {
+        margin: 0;
+        font-size: 12px;
+        opacity: 0.78;
+      }
+    </style>
+  </head>
+  <body>
+    <section class="quick-panel" data-plugin-panel="skills-quick-toggle">
+      <strong>Skills 快捷开关</strong>
+      <p class="hint">快速切换当前工作区受管技能与 Pack；Plugin 内置技能保持只读。</p>
+      <button type="button" class="action-btn" id="open-workbench">打开全幅工作台</button>
+    </section>
+    <script>
+      document.getElementById('open-workbench')?.addEventListener('click', () => {
+        window.parent?.postMessage(
+          { type: 'orca:plugin-api', method: 'navigation.openPage', params: { pageId: 'skills-workbench' } },
+          '*'
+        )
+      })
+    </script>
+  </body>
+</html>

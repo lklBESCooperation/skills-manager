@@ -1,5 +1,7 @@
 import { emptySkillVaultIndex, type SkillVaultIndex } from '../contracts/skill-vault-contract';
 export declare function readSkillVaultIndex(indexPath: string): Promise<SkillVaultIndex | null>;
+/** Reads the symmetric index path first, falling back read-only to the legacy v0.1 path if present. */
+export declare function readSkillVaultIndexWithLegacyFallback(indexPath: string, legacyIndexPath?: string): Promise<SkillVaultIndex | null>;
 export declare function writeSkillVaultIndex(indexPath: string, index: SkillVaultIndex): Promise<void>;
 export declare function rebuildSkillVaultIndex(indexPath: string, entries: SkillVaultIndex['entries']): Promise<SkillVaultIndex>;
 /** Whole-tree LF-normalized sha256, identical to the share-manifest package digest. */

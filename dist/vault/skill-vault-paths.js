@@ -5,6 +5,7 @@ exports.userSkillVaultRoot = userSkillVaultRoot;
 exports.userSkillVaultIndexPath = userSkillVaultIndexPath;
 exports.projectSkillVaultRoot = projectSkillVaultRoot;
 exports.projectSkillVaultIndexPath = projectSkillVaultIndexPath;
+exports.legacyProjectSkillVaultIndexPath = legacyProjectSkillVaultIndexPath;
 exports.skillVaultEntryRoot = skillVaultEntryRoot;
 const node_path_1 = require("node:path");
 // ② skills vault roots (PRD §2.1). Same normalization semantics as
@@ -22,7 +23,12 @@ function userSkillVaultIndexPath(homeDirectory) {
 function projectSkillVaultRoot(workspaceDirectory) {
     return (0, node_path_1.join)(workspaceDirectory, '.pmstudio', 'skills');
 }
+/** Symmetric with `userSkillVaultIndexPath`: `<ws>/.pmstudio/skills-index.json` (D-5). */
 function projectSkillVaultIndexPath(workspaceDirectory) {
+    return (0, node_path_1.join)(workspaceDirectory, '.pmstudio', 'skills-index.json');
+}
+/** Legacy pre-v0.2 location kept strictly for read-only migration fallback. */
+function legacyProjectSkillVaultIndexPath(workspaceDirectory) {
     return (0, node_path_1.join)(workspaceDirectory, '.pmstudio', 'skills', 'skills-index.json');
 }
 function skillVaultEntryRoot(vaultRoot, id) {

@@ -1,12 +1,20 @@
 import { readlink, realpath, stat } from 'node:fs/promises'
 import { basename, sep } from 'node:path'
-import type { SkillVaultIndex } from '../contracts/skill-vault-contract'
+import {
+  classifyCopyModePlacement,
+  type CopyModePlacementState,
+  type SkillVaultIndex
+} from '../contracts/skill-vault-contract'
+import { nativeSkillPathSemantics, normalizedSkillPath } from '../contracts/skill-path-containment'
+import { isReadonlySkillTarget } from '../infra/readonly-root-fence'
 import { readSkillInstallReceipt } from '../infra/skill-state-store'
 import { computeSkillVaultDigest, skillVaultSizeBytes } from './skill-vault-index-service'
 import { normalizedSkillVaultPath } from './skill-vault-paths'
+import { isSkillStagingEntryName } from './staging-marker'
 
 // ② vault attribution scan (PRD §8 1.4): pure planning over the filesystem;
-// adopt performs every mutation. Install receipts decide Orca-managed skips.
+// adopt performs every mutation. Install receipts decide Orca-managed skips,
+// and readonly plugin roots are strictly excluded.
 
 export type SkillVaultDisposition =
   | 'managed'
@@ -14,6 +22,8 @@ export type SkillVaultDisposition =
   | 'duplicate-same-digest'
   | 'conflict'
   | 'orca-managed'
+  | 'copy-drifted'
+  | 'copy-outdated'
 
 export type SkillVaultCandidate = {
   id: string
@@ -43,6 +53,7 @@ export type SkillVaultScanItem = {
   mergePaths: string[]
   /** Conflicting variants with differing digests; listed for a user decision. */
   conflicts: SkillVaultCandidate[]
+  copyModeState?: CopyModePlacementState
 }
 
 export type SkillVaultScanPlan = {
@@ -53,6 +64,9 @@ export type SkillVaultScanPlan = {
     merged: number
     conflicts: number
     orcaManaged: number
+    copyDrifted: number
+    copyOutdated: number
+    skippedReadonly: number
   }
 }
 
@@ -63,8 +77,10 @@ export type SkillVaultScanInput = {
   candidatePaths: readonly string[]
   /** Install receipts directory; omitting it disables Orca-managed detection. */
   installStateDirectory?: string
-  /** Reserved for index-driven fast paths; the scan stays filesystem-driven. */
+  /** Index used for copyMode 3-way digest drift detection. */
   index?: SkillVaultIndex | null
+  /** Dynamic readonly plugin roots to exclude alongside static plugin prefixes. */
+  readonlyRoots?: readonly string[]
 }
 
 type ObservedCandidate = {
@@ -74,6 +90,7 @@ type ObservedCandidate = {
   mtimeMs: number | null
   isLinkToVault: boolean
   orcaManaged: boolean
+  copyState?: CopyModePlacementState
 }
 
 function isInsideVault(path: string, vaultRoot: string): boolean {
@@ -94,33 +111,59 @@ async function linkResolvesInsideVault(candidatePath: string, vaultRoot: string)
     return false
   }
   const resolved = await realpath(candidatePath).catch(() => null)
-  // macOS temp dirs are themselves symlinks (/tmp -> /private/tmp), so resolve
-  // both sides before comparing; a not-yet-created vault root falls back lexical.
   const resolvedRoot = await realpath(vaultRoot).catch(() => vaultRoot)
   return resolved !== null && isInsideVault(resolved, resolvedRoot)
 }
 
 /** Group candidates by directory name; each group's verdict is one plan row. */
 export async function scanSkillVault(input: SkillVaultScanInput): Promise<SkillVaultScanPlan> {
+  const semantics = nativeSkillPathSemantics()
+  const indexById = new Map((input.index?.entries ?? []).map((entry) => [entry.id, entry]))
   const observed: ObservedCandidate[] = []
+  let skippedReadonly = 0
+
   for (const candidatePath of input.candidatePaths) {
+    const id = basename(candidatePath)
+    if (isSkillStagingEntryName(id)) {
+      continue
+    }
+    if (await isReadonlySkillTarget(candidatePath, { readonlyRoots: input.readonlyRoots, semantics })) {
+      skippedReadonly += 1
+      continue
+    }
     const stats = await stat(candidatePath).catch(() => null)
     const isLinkToVault = await linkResolvesInsideVault(candidatePath, input.vaultRoot)
     const receipt = input.installStateDirectory
       ? await readSkillInstallReceipt(input.installStateDirectory, candidatePath).catch(() => null)
       : null
-    // Digests are unnecessary for links (content lives in the vault) and receipts.
-    const digest =
-      isLinkToVault || receipt
-        ? null
-        : await computeSkillVaultDigest(candidatePath).catch(() => null)
+
+    const indexedEntry = indexById.get(id)
+    const placementKey = normalizedSkillPath(candidatePath, semantics)
+    const placement = indexedEntry?.managedPlacements?.[placementKey]
+
+    // Digests are skipped for vault links and receipts unless needed to classify a copyMode placement.
+    const needsDigest = (!isLinkToVault && !receipt) || placement?.topology === 'copy'
+    const digest = needsDigest
+      ? await computeSkillVaultDigest(candidatePath).catch(() => null)
+      : null
+
+    let copyState: CopyModePlacementState | undefined
+    if (placement?.topology === 'copy' && indexedEntry) {
+      copyState = classifyCopyModePlacement({
+        vaultDigest: indexedEntry.digest,
+        observedDigest: digest,
+        placement
+      })
+    }
+
     observed.push({
-      id: basename(candidatePath),
+      id,
       path: candidatePath,
       digest,
       mtimeMs: stats?.mtimeMs ?? null,
       isLinkToVault,
-      orcaManaged: receipt !== null
+      orcaManaged: receipt !== null,
+      copyState
     })
   }
 
@@ -135,6 +178,45 @@ export async function scanSkillVault(input: SkillVaultScanInput): Promise<SkillV
   for (const [id, group] of [...byId.entries()].sort(([left], [right]) =>
     left.localeCompare(right)
   )) {
+    const drifted = group.find((candidate) => candidate.copyState === 'managed-copy-drifted')
+    if (drifted) {
+      items.push({
+        id,
+        disposition: 'copy-drifted',
+        originPath: drifted.path,
+        digest: drifted.digest ?? '',
+        sizeBytes: 0,
+        mtimeMs: drifted.mtimeMs,
+        mergePaths: [],
+        conflicts: [],
+        copyModeState: 'managed-copy-drifted'
+      })
+      continue
+    }
+    const outdated = group.find((candidate) => candidate.copyState === 'managed-copy-outdated')
+    if (outdated) {
+      items.push({
+        id,
+        disposition: 'copy-outdated',
+        originPath: outdated.path,
+        digest: outdated.digest ?? '',
+        sizeBytes: 0,
+        mtimeMs: outdated.mtimeMs,
+        mergePaths: [],
+        conflicts: [],
+        copyModeState: 'managed-copy-outdated'
+      })
+      continue
+    }
+    const managedCopy = group.find((candidate) => candidate.copyState === 'managed-copy-clean')
+    if (managedCopy) {
+      items.push({
+        ...managedItem(id, managedCopy),
+        copyModeState: 'managed-copy-clean'
+      })
+      continue
+    }
+
     const managed = group.find((candidate) => candidate.isLinkToVault)
     if (managed) {
       items.push(managedItem(id, managed))
@@ -146,7 +228,6 @@ export async function scanSkillVault(input: SkillVaultScanInput): Promise<SkillV
       continue
     }
 
-    // flatMap maps the null check onto the element type so digest stays `string` downstream.
     const digested = group.flatMap((candidate) =>
       candidate.digest === null ? [] : [{ ...candidate, digest: candidate.digest }]
     )
@@ -156,7 +237,6 @@ export async function scanSkillVault(input: SkillVaultScanInput): Promise<SkillV
     const sorted = [...digested].sort((left, right) => left.path.localeCompare(right.path))
     const distinctDigests = new Set(sorted.map((candidate) => candidate.digest))
     if (distinctDigests.size > 1) {
-      // The user edited copies apart; adopt never picks a winner silently (PRD §2.3).
       items.push({
         id,
         disposition: 'conflict',
@@ -197,7 +277,10 @@ export async function scanSkillVault(input: SkillVaultScanInput): Promise<SkillV
       adoptable: items.filter((item) => item.disposition === 'adoptable').length,
       merged: items.reduce((total, item) => total + item.mergePaths.length, 0),
       conflicts: items.filter((item) => item.disposition === 'conflict').length,
-      orcaManaged: items.filter((item) => item.disposition === 'orca-managed').length
+      orcaManaged: items.filter((item) => item.disposition === 'orca-managed').length,
+      copyDrifted: items.filter((item) => item.disposition === 'copy-drifted').length,
+      copyOutdated: items.filter((item) => item.disposition === 'copy-outdated').length,
+      skippedReadonly
     }
   }
 }

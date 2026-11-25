@@ -8,6 +8,19 @@ export const SKILL_VAULT_INDEX_FILE_NAME = 'skills-index.json'
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
 
+export const ManagedPlacementTopologySchema = z.enum(['symlink', 'junction', 'copy'])
+export type ManagedPlacementTopology = z.infer<typeof ManagedPlacementTopologySchema>
+
+export const ManagedPlacementRecordSchema = z
+  .object({
+    topology: ManagedPlacementTopologySchema,
+    syncedDigest: z.string().regex(SHA256_PATTERN),
+    syncedMtimeMs: z.number().optional()
+  })
+  .strict()
+
+export type ManagedPlacementRecord = z.infer<typeof ManagedPlacementRecordSchema>
+
 export const SkillVaultEntrySchema = z
   .object({
     /** Stable id: the vault directory name. */
@@ -28,7 +41,9 @@ export const SkillVaultEntrySchema = z
     installedAt: z.string().min(1),
     updatedAt: z.string().min(1),
     /** True when the host cannot create symlinks and placements are copies. */
-    copyMode: z.boolean().optional()
+    copyMode: z.boolean().optional(),
+    /** Per-placement sync digests keyed by normalized destination path (Q6 copyMode drift detection). */
+    managedPlacements: z.record(z.string(), ManagedPlacementRecordSchema).optional()
   })
   .strict()
 
@@ -42,6 +57,34 @@ export const SkillVaultIndexSchema = z
   .strict()
 
 export type SkillVaultIndex = z.infer<typeof SkillVaultIndexSchema>
+
+export type CopyModePlacementState =
+  | 'managed-copy-clean'
+  | 'managed-copy-outdated'
+  | 'managed-copy-drifted'
+  | 'foreign-conflict'
+
+/**
+ * Three-way digest comparison (Q6):
+ * - VaultDigest (D_V), SyncedDigest (D_S), ObservedDigest (D_O).
+ */
+export function classifyCopyModePlacement(input: {
+  vaultDigest: string
+  observedDigest: string | null
+  placement: ManagedPlacementRecord | undefined
+}): CopyModePlacementState {
+  if (!input.placement || input.placement.topology !== 'copy' || input.observedDigest === null) {
+    return 'foreign-conflict'
+  }
+  const { syncedDigest } = input.placement
+  if (input.observedDigest !== syncedDigest) {
+    return 'managed-copy-drifted'
+  }
+  if (syncedDigest !== input.vaultDigest) {
+    return 'managed-copy-outdated'
+  }
+  return 'managed-copy-clean'
+}
 
 export function parseSkillVaultIndex(value: unknown): SkillVaultIndex | null {
   const parsed = SkillVaultIndexSchema.safeParse(value)

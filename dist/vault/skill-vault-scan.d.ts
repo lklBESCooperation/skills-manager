@@ -1,5 +1,5 @@
-import type { SkillVaultIndex } from '../contracts/skill-vault-contract';
-export type SkillVaultDisposition = 'managed' | 'adoptable' | 'duplicate-same-digest' | 'conflict' | 'orca-managed';
+import { type CopyModePlacementState, type SkillVaultIndex } from '../contracts/skill-vault-contract';
+export type SkillVaultDisposition = 'managed' | 'adoptable' | 'duplicate-same-digest' | 'conflict' | 'orca-managed' | 'copy-drifted' | 'copy-outdated';
 export type SkillVaultCandidate = {
     id: string;
     path: string;
@@ -26,6 +26,7 @@ export type SkillVaultScanItem = {
     mergePaths: string[];
     /** Conflicting variants with differing digests; listed for a user decision. */
     conflicts: SkillVaultCandidate[];
+    copyModeState?: CopyModePlacementState;
 };
 export type SkillVaultScanPlan = {
     items: SkillVaultScanItem[];
@@ -35,6 +36,9 @@ export type SkillVaultScanPlan = {
         merged: number;
         conflicts: number;
         orcaManaged: number;
+        copyDrifted: number;
+        copyOutdated: number;
+        skippedReadonly: number;
     };
 };
 export type SkillVaultScanInput = {
@@ -44,8 +48,10 @@ export type SkillVaultScanInput = {
     candidatePaths: readonly string[];
     /** Install receipts directory; omitting it disables Orca-managed detection. */
     installStateDirectory?: string;
-    /** Reserved for index-driven fast paths; the scan stays filesystem-driven. */
+    /** Index used for copyMode 3-way digest drift detection. */
     index?: SkillVaultIndex | null;
+    /** Dynamic readonly plugin roots to exclude alongside static plugin prefixes. */
+    readonlyRoots?: readonly string[];
 };
 /** Group candidates by directory name; each group's verdict is one plan row. */
 export declare function scanSkillVault(input: SkillVaultScanInput): Promise<SkillVaultScanPlan>;

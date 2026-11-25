@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Skills Manager Workbench</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 16px 20px;
+        background: transparent;
+        color: inherit;
+      }
+      .workbench {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+      .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+        padding-bottom: 12px;
+      }
+      .tabs {
+        display: flex;
+        gap: 8px;
+      }
+      .tab {
+        padding: 6px 14px;
+        border-radius: 6px;
+        border: 1px solid rgba(128, 128, 128, 0.3);
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 500;
+      }
+      .tab[aria-selected='true'] {
+        background: rgba(99, 102, 241, 0.16);
+        border-color: rgba(99, 102, 241, 0.6);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .card {
+        border: 1px solid rgba(128, 128, 128, 0.25);
+        border-radius: 8px;
+        padding: 14px;
+      }
+      .card h3 {
+        margin: 0 0 6px;
+        font-size: 14px;
+      }
+      .muted {
+        font-size: 12px;
+        opacity: 0.78;
+        margin: 0;
+      }
+      .panel[hidden] {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="workbench" data-plugin-page="skills-workbench">
+      <header class="header">
+        <div>
+          <strong>Skills Manager</strong>
+          <p class="muted">Vault · 45 Agents · Packs · Read-Only Plugin Audit</p>
+        </div>
+        <nav class="tabs" role="tablist" aria-label="Skills Workbench Sections">
+          <button class="tab" role="tab" aria-selected="true" data-tab="installed">已安装</button>
+          <button class="tab" role="tab" aria-selected="false" data-tab="marketplace">在线市场</button>
+          <button class="tab" role="tab" aria-selected="false" data-tab="packs-audit">技能包与审计</button>
+        </nav>
+      </header>
+
+      <section class="panel" data-panel="installed" role="tabpanel">
+        <div class="grid">
+          <article class="card">
+            <h3>Vault 受管技能</h3>
+            <p class="muted">统一展示 User / Workspace 作用域、45 Agent 启用矩阵与 copyMode 状态。</p>
+          </article>
+          <article class="card">
+            <h3>SKILL.md 编辑器与新建向导</h3>
+            <p class="muted">受 containment 围栏保护的安全读写与 YAML frontmatter 实时校验。</p>
+          </article>
+          <article class="card">
+            <h3>Plugin Skills（只读）</h3>
+            <p class="muted">独立只读展示 Claude / Codex / 宿主插件内置技能，禁止 Adopt、开关与改写。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="marketplace" role="tabpanel" hidden>
+        <div class="grid">
+          <article class="card">
+            <h3>排行榜与搜索</h3>
+            <p class="muted">按周/月/全量排行与关键词搜索在线技能目录。</p>
+          </article>
+          <article class="card">
+            <h3>GitHub 直装</h3>
+            <p class="muted">输入 owner/repo 或 tree URL，经 .orca-stage- 原子暂存校验后直入 Vault。</p>
+          </article>
+          <article class="card">
+            <h3>批量安装分发</h3>
+            <p class="muted">安装后按选定 Agent 目标投影链接并记录受管台账。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="packs-audit" role="tabpanel" hidden>
+        <div class="grid">
+          <article class="card">
+            <h3>静态与动态规则包（Packs）</h3>
+            <p class="muted">支持 v2 组合规则、Apply/Switch Diff 预览、10 槽 Undo 回滚与脱敏导入导出。</p>
+          </article>
+          <article class="card">
+            <h3>只读健康度审计</h3>
+            <p class="muted">检测断链、同摘要重复、内容冲突、copyMode 漂移、退役根目录与插件碰撞。</p>
+          </article>
+          <article class="card">
+            <h3>只读围栏状态</h3>
+            <p class="muted">静态与动态插件路径双重 realpath 隔离验证。</p>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const tabs = document.querySelectorAll('[data-tab]')
+      const panels = document.querySelectorAll('[data-panel]')
+      for (const tab of tabs) {
+        tab.addEventListener('click', () => {
+          const target = tab.getAttribute('data-tab')
+          for (const t of tabs) {
+            t.setAttribute('aria-selected', String(t === tab))
+          }
+          for (const p of panels) {
+            p.hidden = p.getAttribute('data-panel') !== target
+          }
+        })
+      }
+    </script>
+  </body>
+</html>

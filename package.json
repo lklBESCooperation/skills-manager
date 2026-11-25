@@ -1,8 +1,10 @@
 {
   "name": "@pmstudio/skills-manager",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "files": [
-    "dist"
+    "dist",
+    "orca-plugin.json",
+    "ui"
   ],
   "type": "commonjs",
   "main": "./dist/index.js",
@@ -13,29 +15,85 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
-    "./contracts/skill-install-providers": {
-      "types": "./dist/contracts/skill-install-providers.d.ts",
-      "default": "./dist/contracts/skill-install-providers.js"
+    "./contracts": {
+      "orca-source": "./src/contracts/index.ts",
+      "types": "./dist/contracts/index.d.ts",
+      "default": "./dist/contracts/index.js"
     },
     "./contracts/tui-agent": {
+      "orca-source": "./src/contracts/tui-agent.ts",
       "types": "./dist/contracts/tui-agent.d.ts",
       "default": "./dist/contracts/tui-agent.js"
     },
+    "./contracts/agent-skill-registry": {
+      "orca-source": "./src/contracts/agent-skill-registry.ts",
+      "types": "./dist/contracts/agent-skill-registry.d.ts",
+      "default": "./dist/contracts/agent-skill-registry.js"
+    },
+    "./contracts/skill-install-providers": {
+      "orca-source": "./src/contracts/skill-install-providers.ts",
+      "types": "./dist/contracts/skill-install-providers.d.ts",
+      "default": "./dist/contracts/skill-install-providers.js"
+    },
+    "./contracts/skill-install-failure": {
+      "orca-source": "./src/contracts/skill-install-failure.ts",
+      "types": "./dist/contracts/skill-install-failure.d.ts",
+      "default": "./dist/contracts/skill-install-failure.js"
+    },
+    "./contracts/skill-install-contract-types": {
+      "orca-source": "./src/contracts/skill-install-contract-types.ts",
+      "types": "./dist/contracts/skill-install-contract-types.d.ts",
+      "default": "./dist/contracts/skill-install-contract-types.js"
+    },
+    "./contracts/skill-enablement": {
+      "orca-source": "./src/contracts/skill-enablement.ts",
+      "types": "./dist/contracts/skill-enablement.d.ts",
+      "default": "./dist/contracts/skill-enablement.js"
+    },
     "./contracts/skill-vault-contract": {
+      "orca-source": "./src/contracts/skill-vault-contract.ts",
       "types": "./dist/contracts/skill-vault-contract.d.ts",
       "default": "./dist/contracts/skill-vault-contract.js"
     },
     "./contracts/skill-pack-contract": {
+      "orca-source": "./src/contracts/skill-pack-contract.ts",
       "types": "./dist/contracts/skill-pack-contract.d.ts",
       "default": "./dist/contracts/skill-pack-contract.js"
     },
+    "./contracts/plugin-skill-contract": {
+      "orca-source": "./src/contracts/plugin-skill-contract.ts",
+      "types": "./dist/contracts/plugin-skill-contract.d.ts",
+      "default": "./dist/contracts/plugin-skill-contract.js"
+    },
     "./contracts/skill-metadata": {
+      "orca-source": "./src/contracts/skill-metadata.ts",
       "types": "./dist/contracts/skill-metadata.d.ts",
       "default": "./dist/contracts/skill-metadata.js"
+    },
+    "./contracts/skill-path-containment": {
+      "orca-source": "./src/contracts/skill-path-containment.ts",
+      "types": "./dist/contracts/skill-path-containment.d.ts",
+      "default": "./dist/contracts/skill-path-containment.js"
+    },
+    "./contracts/skill-catalog-contract": {
+      "orca-source": "./src/contracts/skill-catalog-contract.ts",
+      "types": "./dist/contracts/skill-catalog-contract.d.ts",
+      "default": "./dist/contracts/skill-catalog-contract.js"
+    },
+    "./contracts/skill-editor-contract": {
+      "orca-source": "./src/contracts/skill-editor-contract.ts",
+      "types": "./dist/contracts/skill-editor-contract.d.ts",
+      "default": "./dist/contracts/skill-editor-contract.js"
+    },
+    "./contracts/skill-audit-contract": {
+      "orca-source": "./src/contracts/skill-audit-contract.ts",
+      "types": "./dist/contracts/skill-audit-contract.d.ts",
+      "default": "./dist/contracts/skill-audit-contract.js"
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.contracts.json && tsc -p tsconfig.test.json",
+    "build": "tsc -p tsconfig.contracts.json && tsc -p tsconfig.json",
     "prepare": "pnpm build",
     "test": "vitest run --maxWorkers=2"
   },

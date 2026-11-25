@@ -4,9 +4,13 @@ exports.scanSkillVault = scanSkillVault;
 exports.adoptableSkillVaultItems = adoptableSkillVaultItems;
 const promises_1 = require("node:fs/promises");
 const node_path_1 = require("node:path");
+const skill_vault_contract_1 = require("../contracts/skill-vault-contract");
+const skill_path_containment_1 = require("../contracts/skill-path-containment");
+const readonly_root_fence_1 = require("../infra/readonly-root-fence");
 const skill_state_store_1 = require("../infra/skill-state-store");
 const skill_vault_index_service_1 = require("./skill-vault-index-service");
 const skill_vault_paths_1 = require("./skill-vault-paths");
+const staging_marker_1 = require("./staging-marker");
 function isInsideVault(path, vaultRoot) {
     const normalizedRoot = (0, skill_vault_paths_1.normalizedSkillVaultPath)(vaultRoot);
     const normalizedPath = (0, skill_vault_paths_1.normalizedSkillVaultPath)(path);
@@ -22,31 +26,53 @@ async function linkResolvesInsideVault(candidatePath, vaultRoot) {
         return false;
     }
     const resolved = await (0, promises_1.realpath)(candidatePath).catch(() => null);
-    // macOS temp dirs are themselves symlinks (/tmp -> /private/tmp), so resolve
-    // both sides before comparing; a not-yet-created vault root falls back lexical.
     const resolvedRoot = await (0, promises_1.realpath)(vaultRoot).catch(() => vaultRoot);
     return resolved !== null && isInsideVault(resolved, resolvedRoot);
 }
 /** Group candidates by directory name; each group's verdict is one plan row. */
 async function scanSkillVault(input) {
+    const semantics = (0, skill_path_containment_1.nativeSkillPathSemantics)();
+    const indexById = new Map((input.index?.entries ?? []).map((entry) => [entry.id, entry]));
     const observed = [];
+    let skippedReadonly = 0;
     for (const candidatePath of input.candidatePaths) {
+        const id = (0, node_path_1.basename)(candidatePath);
+        if ((0, staging_marker_1.isSkillStagingEntryName)(id)) {
+            continue;
+        }
+        if (await (0, readonly_root_fence_1.isReadonlySkillTarget)(candidatePath, { readonlyRoots: input.readonlyRoots, semantics })) {
+            skippedReadonly += 1;
+            continue;
+        }
         const stats = await (0, promises_1.stat)(candidatePath).catch(() => null);
         const isLinkToVault = await linkResolvesInsideVault(candidatePath, input.vaultRoot);
         const receipt = input.installStateDirectory
             ? await (0, skill_state_store_1.readSkillInstallReceipt)(input.installStateDirectory, candidatePath).catch(() => null)
             : null;
-        // Digests are unnecessary for links (content lives in the vault) and receipts.
-        const digest = isLinkToVault || receipt
-            ? null
-            : await (0, skill_vault_index_service_1.computeSkillVaultDigest)(candidatePath).catch(() => null);
+        const indexedEntry = indexById.get(id);
+        const placementKey = (0, skill_path_containment_1.normalizedSkillPath)(candidatePath, semantics);
+        const placement = indexedEntry?.managedPlacements?.[placementKey];
+        // Digests are skipped for vault links and receipts unless needed to classify a copyMode placement.
+        const needsDigest = (!isLinkToVault && !receipt) || placement?.topology === 'copy';
+        const digest = needsDigest
+            ? await (0, skill_vault_index_service_1.computeSkillVaultDigest)(candidatePath).catch(() => null)
+            : null;
+        let copyState;
+        if (placement?.topology === 'copy' && indexedEntry) {
+            copyState = (0, skill_vault_contract_1.classifyCopyModePlacement)({
+                vaultDigest: indexedEntry.digest,
+                observedDigest: digest,
+                placement
+            });
+        }
         observed.push({
-            id: (0, node_path_1.basename)(candidatePath),
+            id,
             path: candidatePath,
             digest,
             mtimeMs: stats?.mtimeMs ?? null,
             isLinkToVault,
-            orcaManaged: receipt !== null
+            orcaManaged: receipt !== null,
+            copyState
         });
     }
     const byId = new Map();
@@ -57,6 +83,44 @@ async function scanSkillVault(input) {
     }
     const items = [];
     for (const [id, group] of [...byId.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+        const drifted = group.find((candidate) => candidate.copyState === 'managed-copy-drifted');
+        if (drifted) {
+            items.push({
+                id,
+                disposition: 'copy-drifted',
+                originPath: drifted.path,
+                digest: drifted.digest ?? '',
+                sizeBytes: 0,
+                mtimeMs: drifted.mtimeMs,
+                mergePaths: [],
+                conflicts: [],
+                copyModeState: 'managed-copy-drifted'
+            });
+            continue;
+        }
+        const outdated = group.find((candidate) => candidate.copyState === 'managed-copy-outdated');
+        if (outdated) {
+            items.push({
+                id,
+                disposition: 'copy-outdated',
+                originPath: outdated.path,
+                digest: outdated.digest ?? '',
+                sizeBytes: 0,
+                mtimeMs: outdated.mtimeMs,
+                mergePaths: [],
+                conflicts: [],
+                copyModeState: 'managed-copy-outdated'
+            });
+            continue;
+        }
+        const managedCopy = group.find((candidate) => candidate.copyState === 'managed-copy-clean');
+        if (managedCopy) {
+            items.push({
+                ...managedItem(id, managedCopy),
+                copyModeState: 'managed-copy-clean'
+            });
+            continue;
+        }
         const managed = group.find((candidate) => candidate.isLinkToVault);
         if (managed) {
             items.push(managedItem(id, managed));
@@ -67,7 +131,6 @@ async function scanSkillVault(input) {
             items.push(orcaManagedItem(id, orcaManaged));
             continue;
         }
-        // flatMap maps the null check onto the element type so digest stays `string` downstream.
         const digested = group.flatMap((candidate) => candidate.digest === null ? [] : [{ ...candidate, digest: candidate.digest }]);
         if (digested.length === 0) {
             continue;
@@ -75,7 +138,6 @@ async function scanSkillVault(input) {
         const sorted = [...digested].sort((left, right) => left.path.localeCompare(right.path));
         const distinctDigests = new Set(sorted.map((candidate) => candidate.digest));
         if (distinctDigests.size > 1) {
-            // The user edited copies apart; adopt never picks a winner silently (PRD §2.3).
             items.push({
                 id,
                 disposition: 'conflict',
@@ -114,7 +176,10 @@ async function scanSkillVault(input) {
             adoptable: items.filter((item) => item.disposition === 'adoptable').length,
             merged: items.reduce((total, item) => total + item.mergePaths.length, 0),
             conflicts: items.filter((item) => item.disposition === 'conflict').length,
-            orcaManaged: items.filter((item) => item.disposition === 'orca-managed').length
+            orcaManaged: items.filter((item) => item.disposition === 'orca-managed').length,
+            copyDrifted: items.filter((item) => item.disposition === 'copy-drifted').length,
+            copyOutdated: items.filter((item) => item.disposition === 'copy-outdated').length,
+            skippedReadonly
         }
     };
 }
