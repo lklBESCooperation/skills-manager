@@ -1,5 +1,5 @@
 import { readlink, realpath, stat } from 'node:fs/promises'
-import { basename, sep } from 'node:path'
+import { basename, join, sep } from 'node:path'
 import {
   classifyCopyModePlacement,
   type CopyModePlacementState,
@@ -131,7 +131,11 @@ export async function scanSkillVault(input: SkillVaultScanInput): Promise<SkillV
       skippedReadonly += 1
       continue
     }
-    const stats = await stat(candidatePath).catch(() => null)
+    const [dirStats, skillMdStats] = await Promise.all([
+      stat(candidatePath).catch(() => null),
+      stat(join(candidatePath, 'SKILL.md')).catch(() => null)
+    ])
+    const mtimeMs = skillMdStats?.mtimeMs ?? dirStats?.mtimeMs ?? null
     const isLinkToVault = await linkResolvesInsideVault(candidatePath, input.vaultRoot)
     const receipt = input.installStateDirectory
       ? await readSkillInstallReceipt(input.installStateDirectory, candidatePath).catch(() => null)
@@ -160,7 +164,7 @@ export async function scanSkillVault(input: SkillVaultScanInput): Promise<SkillV
       id,
       path: candidatePath,
       digest,
-      mtimeMs: stats?.mtimeMs ?? null,
+      mtimeMs,
       isLinkToVault,
       orcaManaged: receipt !== null,
       copyState

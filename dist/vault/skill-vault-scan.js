@@ -44,7 +44,11 @@ async function scanSkillVault(input) {
             skippedReadonly += 1;
             continue;
         }
-        const stats = await (0, promises_1.stat)(candidatePath).catch(() => null);
+        const [dirStats, skillMdStats] = await Promise.all([
+            (0, promises_1.stat)(candidatePath).catch(() => null),
+            (0, promises_1.stat)((0, node_path_1.join)(candidatePath, 'SKILL.md')).catch(() => null)
+        ]);
+        const mtimeMs = skillMdStats?.mtimeMs ?? dirStats?.mtimeMs ?? null;
         const isLinkToVault = await linkResolvesInsideVault(candidatePath, input.vaultRoot);
         const receipt = input.installStateDirectory
             ? await (0, skill_state_store_1.readSkillInstallReceipt)(input.installStateDirectory, candidatePath).catch(() => null)
@@ -69,7 +73,7 @@ async function scanSkillVault(input) {
             id,
             path: candidatePath,
             digest,
-            mtimeMs: stats?.mtimeMs ?? null,
+            mtimeMs,
             isLinkToVault,
             orcaManaged: receipt !== null,
             copyState
