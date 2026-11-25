@@ -111,4 +111,118 @@ describe('SkillEditorService (containment, frontmatter validation & wizard)', ()
     ).rejects.toThrow('skill-path-escape')
     expect(await readFile(secretOutside, 'utf8')).toBe('top-secret')
   })
+
+  it('blocks deleting SKILL.md across normalized relative paths, case variants, and internal symlinks', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'orca-editor-del-guard-'))
+    roots.push(root)
+    const scope = {
+      vaultRoot: join(root, '.pmstudio', 'skills'),
+      indexPath: join(root, '.pmstudio', 'skills-index.json')
+    }
+    await createLocalSkillInVault(
+      scope,
+      {
+        id: 'guard-skill',
+        name: 'Guard Skill',
+        description: 'Protected SKILL.md'
+      },
+      [{ relativePath: 'references/note.md', content: '# Note\n' }]
+    )
+    const skillDir = join(scope.vaultRoot, 'guard-skill')
+
+    for (const candidate of [
+      'SKILL.md',
+      './SKILL.md',
+      'references/../SKILL.md',
+      'skill.md',
+      './Skill.MD',
+      'references/../sKiLl.Md'
+    ]) {
+      await expect(deleteSkillFile(scope, 'guard-skill', candidate)).rejects.toThrow(
+        'skill-editor-cannot-delete-skill-md'
+      )
+    }
+
+    const selfLink = join(skillDir, 'self-link')
+    await symlink(skillDir, selfLink, 'dir')
+    try {
+      for (const candidate of ['self-link/SKILL.md', 'self-link/skill.md']) {
+        await expect(deleteSkillFile(scope, 'guard-skill', candidate)).rejects.toThrow(
+          'skill-editor-cannot-delete-skill-md'
+        )
+      }
+    } finally {
+      await rm(selfLink, { force: true })
+    }
+
+    const surviving = await readSkillFile(scope, 'guard-skill', 'SKILL.md')
+    expect(surviving).toContain('name: Guard Skill')
+  })
+
+  it('enforces frontmatter validation and canonical SKILL.md path across normalized and case-variant writes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'orca-editor-write-guard-'))
+    roots.push(root)
+    const scope = {
+      vaultRoot: join(root, '.pmstudio', 'skills'),
+      indexPath: join(root, '.pmstudio', 'skills-index.json')
+    }
+    await createLocalSkillInVault(
+      scope,
+      {
+        id: 'case-skill',
+        name: 'Case Skill',
+        description: 'Initial description'
+      },
+      [{ relativePath: 'references/ref.md', content: '# Ref\n' }]
+    )
+    const skillDir = join(scope.vaultRoot, 'case-skill')
+
+    for (const candidate of [
+      './SKILL.md',
+      'references/../SKILL.md',
+      'skill.md',
+      './Skill.MD'
+    ]) {
+      await expect(
+        writeSkillFile(scope, 'case-skill', candidate, '# Missing frontmatter\n')
+      ).rejects.toThrow('skill-editor-invalid-frontmatter')
+    }
+
+    const selfLink = join(skillDir, 'self-link')
+    await symlink(skillDir, selfLink, 'dir')
+    try {
+      await expect(
+        writeSkillFile(scope, 'case-skill', 'self-link/skill.md', '# Missing frontmatter\n')
+      ).rejects.toThrow('skill-editor-invalid-frontmatter')
+    } finally {
+      await rm(selfLink, { force: true })
+    }
+
+    await expect(
+      createLocalSkillInVault(
+        scope,
+        {
+          id: 'extra-invalid',
+          name: 'Extra Invalid',
+          description: 'Valid wizard input'
+        },
+        [{ relativePath: 'skill.md', content: '# Unvalidated overwrite\n' }]
+      )
+    ).rejects.toThrow('skill-editor-invalid-frontmatter')
+
+    await writeSkillFile(
+      scope,
+      'case-skill',
+      './skill.md',
+      '---\nname: Case Skill Updated\ndescription: Updated via lowercase path\n---\nUpdated.\n'
+    )
+
+    const files = await listSkillFiles(scope, 'case-skill')
+    expect(files.filter((f) => f.relativePath.toLowerCase() === 'skill.md')).toEqual([
+      { relativePath: 'SKILL.md', kind: 'file', sizeBytes: expect.any(Number) }
+    ])
+    expect(await readSkillFile(scope, 'case-skill', 'SKILL.md')).toContain(
+      'name: Case Skill Updated'
+    )
+  })
 })
