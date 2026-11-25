@@ -1,18 +1,15 @@
-// Type extraction from src/shared/skill-install-contract.ts and
-// src/shared/skill-install-failure.ts (upstream-shared). Re-sync on edits.
-export type SkillInstallFailureCategory =
-  | 'filesystem'
-  | 'network'
-  | 'validation'
-  | 'conflict'
-  | 'cancelled'
-  | 'unknown'
+export {
+  classifySkillInstallFailureCode,
+  SKILL_INSTALL_BUSY_FAILURE,
+  SKILL_INSTALL_CANCELLED_FAILURE,
+  SKILL_INSTALL_RPC_ERROR_CODE,
+  SkillInstallFailureCategorySchema,
+  SkillInstallFailureSchema,
+  type SkillInstallFailure,
+  type SkillInstallFailureCategory
+} from './skill-install-failure'
 
-export type SkillInstallFailure = {
-  category: SkillInstallFailureCategory
-  code: string
-  retryable: boolean
-}
+import type { SkillInstallFailure } from './skill-install-failure'
 
 export type SkillPlacementResult = {
   provider: string

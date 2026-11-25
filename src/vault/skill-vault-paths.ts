@@ -20,7 +20,13 @@ export function projectSkillVaultRoot(workspaceDirectory: string): string {
   return join(workspaceDirectory, '.pmstudio', 'skills')
 }
 
+/** Symmetric with `userSkillVaultIndexPath`: `<ws>/.pmstudio/skills-index.json` (D-5). */
 export function projectSkillVaultIndexPath(workspaceDirectory: string): string {
+  return join(workspaceDirectory, '.pmstudio', 'skills-index.json')
+}
+
+/** Legacy pre-v0.2 location kept strictly for read-only migration fallback. */
+export function legacyProjectSkillVaultIndexPath(workspaceDirectory: string): string {
   return join(workspaceDirectory, '.pmstudio', 'skills', 'skills-index.json')
 }
 

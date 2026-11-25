@@ -1,12 +1,22 @@
 import { lstat, readlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import {
+  isSkillEffectiveForAgent,
   resolveEffectiveSkills,
+  type AgentId,
   type EffectiveSkillState,
+  type SkillAgentOverrides,
   type SkillProjectOverrides
 } from '../contracts/skill-enablement'
-import { nativeSkillPathSemantics, skillPathsEqual } from '../contracts/skill-path-containment'
+import {
+  nativeSkillPathSemantics,
+  normalizedSkillPath,
+  skillPathsEqual
+} from '../contracts/skill-path-containment'
+import { classifyCopyModePlacement, type SkillVaultIndex } from '../contracts/skill-vault-contract'
+import { isReadonlySkillTarget } from '../infra/readonly-root-fence'
 import type { SkillProviderDestination } from '../infra/skill-provider-destinations'
+import { computeSkillVaultDigest } from '../vault/skill-vault-index-service'
 
 export type SkillEnablementObservation = {
   skillId: string
@@ -17,6 +27,7 @@ export type SkillEnablementObservation = {
   /** Any entry exists at the destination (link, directory, or file). */
   exists: boolean
   readsCanonicalRoot: boolean
+  isSymbolicLink: boolean
 }
 
 export type SkillEnablementMasterLocation =
@@ -25,11 +36,12 @@ export type SkillEnablementMasterLocation =
   | { location: 'missing' }
 
 export type SkillEnablementPlanAction =
-  | { kind: 'add'; observation: SkillEnablementObservation }
-  | { kind: 'remove'; observation: SkillEnablementObservation }
+  | { kind: 'add'; observation: SkillEnablementObservation; copyMode?: boolean }
+  | { kind: 'remove'; observation: SkillEnablementObservation; copyMode?: boolean }
   | { kind: 'keep'; observation: SkillEnablementObservation }
-  /** Canonical-root providers enable by moving the vault master into canonical, not by linking. */
-  | { kind: 'move-to-canonical'; observation: SkillEnablementObservation }
+  | { kind: 'refresh-copy'; observation: SkillEnablementObservation }
+  /** One-time migration of a legacy canonical-resident skill into permanent Vault master. */
+  | { kind: 'adopt-canonical-to-vault'; observation: SkillEnablementObservation }
 
 export type SkillEnablementPlan = {
   actions: SkillEnablementPlanAction[]
@@ -37,11 +49,14 @@ export type SkillEnablementPlan = {
     add: number
     remove: number
     keep: number
-    moveToCanonical: number
+    refreshCopy: number
+    adoptCanonicalToVault: number
     removeCanonical: number
   }
-  /** Unresolvable destinations the applier must not touch (foreign directories at a target). */
+  /** Unresolvable destinations the applier must not touch (foreign directories or drifted copies). */
   conflicts: SkillEnablementObservation[]
+  /** Readonly plugin destinations skipped/blocked by the fence. */
+  readonlyBlocked: SkillEnablementObservation[]
   /** Where each planned skill's master lives right now (vault, canonical, or missing). */
   masters: Record<string, SkillEnablementMasterLocation>
 }
@@ -51,35 +66,39 @@ export type SkillEnablementPlannerInput = {
   installedSkillIds: readonly string[]
   userDefaults: Readonly<Record<string, EffectiveSkillState | undefined>>
   projectOverrides: Readonly<SkillProjectOverrides>
+  userAgentOverrides?: Readonly<SkillAgentOverrides>
+  projectAgentOverrides?: Readonly<SkillAgentOverrides>
+  scope?: 'global' | 'workspace'
   destinations: readonly SkillProviderDestination[]
-  /** Canonical root for this scope; masters found here count as installed. */
+  /** Canonical root for this scope; masters found here migrate once into Vault. */
   canonicalRoot?: string
-  /**
-   * Moves relocate the single master, so they may only cross vault↔canonical inside one
-   * scope. A canonical root outside the vault's scope gets a plain link instead.
-   */
+  /** Deprecated compatibility flag: Vault is always permanent master; legacy canonical dirs migrate into Vault. */
   canonicalMoveAllowed?: boolean
+  copyMode?: boolean
+  vaultIndex?: SkillVaultIndex | null
+  readonlyRoots?: readonly string[]
 }
 
-/** lstat semantics: a link that points anywhere still reports as a link; resolve for target compare. */
 async function observePlacement(
   skillId: string,
   destination: SkillProviderDestination
 ): Promise<SkillEnablementObservation> {
   const destinationPath = join(destination.rootPath, skillId)
-  const stat = await lstat(destinationPath).catch(() => null)
-  if (!stat) {
+  const entryStat = await lstat(destinationPath).catch(() => null)
+  if (!entryStat) {
     return {
       skillId,
       provider: destination.provider,
       rootPath: destination.rootPath,
       linkTarget: null,
       exists: false,
-      readsCanonicalRoot: destination.readsCanonicalRoot
+      readsCanonicalRoot: destination.readsCanonicalRoot,
+      isSymbolicLink: false
     }
   }
   let linkTarget: string | null = null
-  if (stat.isSymbolicLink()) {
+  const isSym = entryStat.isSymbolicLink()
+  if (isSym) {
     const raw = await readlink(destinationPath).catch(() => null)
     if (raw !== null) {
       linkTarget = resolve(destination.rootPath, raw)
@@ -91,36 +110,46 @@ async function observePlacement(
     rootPath: destination.rootPath,
     linkTarget,
     exists: true,
-    readsCanonicalRoot: destination.readsCanonicalRoot
+    readsCanonicalRoot: destination.readsCanonicalRoot,
+    isSymbolicLink: isSym
   }
 }
 
-function isMasterLink(observation: SkillEnablementObservation, masterPath: string): boolean {
+function isVaultMasterLink(observation: SkillEnablementObservation, vaultMasterPath: string): boolean {
   if (!observation.linkTarget) {
     return false
   }
-  return skillPathsEqual(observation.linkTarget, masterPath, nativeSkillPathSemantics())
+  return skillPathsEqual(observation.linkTarget, vaultMasterPath, nativeSkillPathSemantics())
 }
 
 /**
- * Diff actual per-provider placement against the resolved target. Non-canonical roots plan a
- * link (add), unlink (remove), or keep; canonical-root providers plan a master move instead.
+ * Vault is the permanent single master (`<vaultRoot>/<skillId>`). Both canonical `.agents/skills`
+ * and private provider roots receive symlinks/junctions (or tracked `copyMode` copies) pointing at
+ * Vault. Legacy canonical-resident masters emit a one-time `adopt-canonical-to-vault` action.
  */
 export async function planSkillEnablement(
   input: SkillEnablementPlannerInput
 ): Promise<SkillEnablementPlan> {
+  const semantics = nativeSkillPathSemantics()
   const resolution = resolveEffectiveSkills({
     installed: input.installedSkillIds,
     userDefaults: input.userDefaults,
-    projectOverrides: input.projectOverrides
+    projectOverrides: input.projectOverrides,
+    userAgentOverrides: input.userAgentOverrides,
+    projectAgentOverrides: input.projectAgentOverrides,
+    scope: input.scope ?? 'global'
   })
   const actions: SkillEnablementPlanAction[] = []
   const conflicts: SkillEnablementObservation[] = []
+  const readonlyBlocked: SkillEnablementObservation[] = []
   const masters = await locateSkillMasters(
     input.installedSkillIds,
     input.vaultRoot,
     input.canonicalRoot
   )
+  const indexById = new Map((input.vaultIndex?.entries ?? []).map((entry) => [entry.id, entry]))
+  const migratedInPlan = new Set<string>()
+
   for (const destination of input.destinations) {
     for (const skillId of input.installedSkillIds) {
       const target = resolution.get(skillId)
@@ -128,60 +157,103 @@ export async function planSkillEnablement(
         continue
       }
       const observation = await observePlacement(skillId, destination)
-      if (destination.readsCanonicalRoot && input.canonicalMoveAllowed) {
-        // Canonical holds masters for this provider; enable=master present, disable=absent.
-        const canonicalEnabled = observation.exists
-        if (target.effective === 'enabled') {
-          actions.push(
-            canonicalEnabled
-              ? { kind: 'keep', observation }
-              : { kind: 'move-to-canonical', observation }
-          )
-        } else if (canonicalEnabled) {
-          actions.push({ kind: 'remove', observation })
-        } else {
-          actions.push({ kind: 'keep', observation })
+      const destinationPath = join(destination.rootPath, skillId)
+      if (
+        await isReadonlySkillTarget(destinationPath, {
+          readonlyRoots: input.readonlyRoots,
+          semantics
+        })
+      ) {
+        readonlyBlocked.push(observation)
+        continue
+      }
+
+      const master = masters[skillId]
+      const vaultMasterPath = join(input.vaultRoot, skillId)
+      const effectiveForProvider = isSkillEffectiveForAgent(
+        target,
+        destination.provider as AgentId
+      )
+
+      // One-time migration when a skill master still sits in canonical without a Vault copy.
+      if (
+        destination.readsCanonicalRoot &&
+        master?.location === 'canonical' &&
+        !migratedInPlan.has(skillId) &&
+        observation.exists
+      ) {
+        migratedInPlan.add(skillId)
+        actions.push({ kind: 'adopt-canonical-to-vault', observation })
+        if (effectiveForProvider) {
+          actions.push({ kind: 'add', observation, copyMode: input.copyMode })
         }
         continue
       }
-      // Compare against the master's real current location so a valid link is never
-      // misread as foreign after a canonical provider moved it out of the vault.
-      const linked = isMasterLink(observation, masterLinkTarget(input, skillId, masters))
-      if (observation.exists && !linked) {
-        // A foreign directory/file owns the name; never delete or overwrite it.
+
+      const linkedToVault = isVaultMasterLink(observation, vaultMasterPath)
+
+      // Handle copyMode placements via 3-way digest protection (Q6).
+      if (observation.exists && !observation.isSymbolicLink && input.copyMode) {
+        const entry = indexById.get(skillId)
+        const placement = entry?.managedPlacements?.[normalizedSkillPath(destinationPath, semantics)]
+        if (entry && placement?.topology === 'copy') {
+          const observedDigest = await computeSkillVaultDigest(destinationPath).catch(() => null)
+          const copyState = classifyCopyModePlacement({
+            vaultDigest: entry.digest,
+            observedDigest,
+            placement
+          })
+          if (copyState === 'managed-copy-drifted') {
+            // Drifted local edits are protected; never auto-delete or overwrite!
+            conflicts.push(observation)
+            continue
+          }
+          if (effectiveForProvider) {
+            actions.push(
+              copyState === 'managed-copy-outdated'
+                ? { kind: 'refresh-copy', observation }
+                : { kind: 'keep', observation }
+            )
+          } else {
+            actions.push({ kind: 'remove', observation, copyMode: true })
+          }
+          continue
+        }
+      }
+
+      if (observation.exists && !linkedToVault) {
         conflicts.push(observation)
         continue
       }
-      if (target.effective === 'enabled') {
-        actions.push(linked ? { kind: 'keep', observation } : { kind: 'add', observation })
+
+      if (effectiveForProvider) {
+        actions.push(
+          linkedToVault
+            ? { kind: 'keep', observation }
+            : { kind: 'add', observation, copyMode: input.copyMode }
+        )
       } else {
-        actions.push(linked ? { kind: 'remove', observation } : { kind: 'keep', observation })
+        actions.push(
+          linkedToVault
+            ? { kind: 'remove', observation, copyMode: input.copyMode }
+            : { kind: 'keep', observation }
+        )
       }
     }
   }
+
   const counts = {
     add: actions.filter((action) => action.kind === 'add').length,
     remove: actions.filter((action) => action.kind === 'remove').length,
     keep: actions.filter((action) => action.kind === 'keep').length,
-    moveToCanonical: actions.filter((action) => action.kind === 'move-to-canonical').length,
+    refreshCopy: actions.filter((action) => action.kind === 'refresh-copy').length,
+    adoptCanonicalToVault: actions.filter((action) => action.kind === 'adopt-canonical-to-vault')
+      .length,
     removeCanonical: actions.filter(
       (action) => action.kind === 'remove' && action.observation.readsCanonicalRoot
     ).length
   }
-  return { actions, counts, conflicts, masters }
-}
-
-/** The link for a non-canonical provider must follow the master wherever it currently lives. */
-function masterLinkTarget(
-  input: Pick<SkillEnablementPlannerInput, 'vaultRoot' | 'canonicalRoot'>,
-  skillId: string,
-  masters: Record<string, SkillEnablementMasterLocation>
-): string {
-  const master = masters[skillId]
-  if (master?.location === 'canonical' && input.canonicalRoot) {
-    return join(input.canonicalRoot, skillId)
-  }
-  return join(input.vaultRoot, skillId)
+  return { actions, counts, conflicts, readonlyBlocked, masters }
 }
 
 async function locateSkillMasters(

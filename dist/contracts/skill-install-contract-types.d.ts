@@ -1,9 +1,5 @@
-export type SkillInstallFailureCategory = 'filesystem' | 'network' | 'validation' | 'conflict' | 'cancelled' | 'unknown';
-export type SkillInstallFailure = {
-    category: SkillInstallFailureCategory;
-    code: string;
-    retryable: boolean;
-};
+export { classifySkillInstallFailureCode, SKILL_INSTALL_BUSY_FAILURE, SKILL_INSTALL_CANCELLED_FAILURE, SKILL_INSTALL_RPC_ERROR_CODE, SkillInstallFailureCategorySchema, SkillInstallFailureSchema, type SkillInstallFailure, type SkillInstallFailureCategory } from './skill-install-failure';
+import type { SkillInstallFailure } from './skill-install-failure';
 export type SkillPlacementResult = {
     provider: string;
     path: string;

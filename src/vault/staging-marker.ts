@@ -1,4 +1,13 @@
-// SKILL_VAULT_STAGE_MARKER semantics belong to vault adopt transactions; the
-// host's staging-names.ts stays upstream-shared. Marker string must stay
-// byte-identical to keep host discovery filters recognizing vault staging dirs.
-export const SKILL_VAULT_STAGE_MARKER = '.pmstage-'
+/**
+ * Staging directory marker shared between skills-manager and PMStudio discovery filters
+ * (`SKILL_STAGING_GLOB = '.*.orca-*'`). Any interrupted staging directory is skipped
+ * by local and WSL scanners.
+ */
+export const SKILL_VAULT_STAGE_MARKER = '.orca-stage-'
+export const SKILL_STAGING_GLOB = '.*.orca-*'
+
+const STAGING_ENTRY_PATTERN = /^\..+\.(?:orca|pmstage)-/u
+
+export function isSkillStagingEntryName(name: string): boolean {
+  return STAGING_ENTRY_PATTERN.test(name)
+}

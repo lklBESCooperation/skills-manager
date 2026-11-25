@@ -179,9 +179,58 @@ export async function observeSkillPackage(
   executablePaths?: ReadonlySet<string>,
   signal?: AbortSignal,
   platform: NodeJS.Platform = process.platform,
-  inferShebangExecutables = false
+  inferShebangExecutables = false,
+  /** A folder this answers true for is left out unread: none of its files count against the limits. */
+  skipDirectory?: (absolutePath: string) => Promise<boolean>
 ): Promise<ObservedSkillPackage> {
+  const files = await walkSkillPackage(packageRoot, limits, {
+    executablePaths,
+    signal,
+    platform,
+    inferShebangExecutables,
+    skipDirectory,
+    readContents: true
+  })
+  // Identity hashes complete paths in code-unit order (ICU-independent), the order manifest validators require.
+  files.sort((left, right) => compareCodeUnits(left.path, right.path))
+  return { files, observedDigest: skillPackageDigest(files) }
+}
+
+/**
+ * Throws what observeSkillPackage would for this folder's shape (links, special files, depth, counts,
+ * sizes by lstat), without reading or hashing its files (`skipDirectory` may read what it needs).
+ */
+export async function checkSkillPackageShape(
+  packageRoot: string,
+  limits: SkillPackageObservationLimits = SKILL_PACKAGE_OBSERVATION_LIMITS,
+  skipDirectory?: (absolutePath: string) => Promise<boolean>,
+  signal?: AbortSignal
+): Promise<void> {
+  await walkSkillPackage(packageRoot, limits, {
+    signal,
+    platform: process.platform,
+    inferShebangExecutables: false,
+    skipDirectory,
+    readContents: false
+  })
+}
+
+async function walkSkillPackage(
+  packageRoot: string,
+  limits: SkillPackageObservationLimits,
+  options: {
+    executablePaths?: ReadonlySet<string>
+    signal?: AbortSignal
+    platform: NodeJS.Platform
+    inferShebangExecutables: boolean
+    skipDirectory?: (absolutePath: string) => Promise<boolean>
+    /** false: sizes come from lstat and no file is read, so no identities are returned. */
+    readContents: boolean
+  }
+): Promise<ObservedSkillFile[]> {
+  const { executablePaths, signal, platform, inferShebangExecutables, skipDirectory } = options
   const files: ObservedSkillFile[] = []
+  let fileCount = 0
   const caseFoldedPaths = new Map<string, string>()
   const normalizedExecutablePaths =
     platform === 'win32' && executablePaths
@@ -245,6 +294,9 @@ export async function observeSkillPackage(
         throw new Error('skill-package-link')
       }
       if (fileStat.isDirectory()) {
+        if (await skipDirectory?.(absolutePath)) {
+          continue
+        }
         if (depth >= limits.maximumDepth) {
           throw new Error('skill-package-depth-limit')
         }
@@ -253,8 +305,19 @@ export async function observeSkillPackage(
         if (fileStat.nlink !== 1) {
           throw new Error('skill-package-link')
         }
-        if (files.length >= limits.maximumFiles) {
+        if (fileCount >= limits.maximumFiles) {
           throw new Error('skill-package-file-count-limit')
+        }
+        fileCount += 1
+        if (!options.readContents) {
+          if (fileStat.size > limits.maximumSingleFileBytes) {
+            throw new Error('skill-package-file-size-limit')
+          }
+          if (fileStat.size > limits.maximumTotalBytes - totalBytes) {
+            throw new Error('skill-package-total-size-limit')
+          }
+          totalBytes += fileStat.size
+          continue
         }
         const bytes = await readBoundedSkillFile(
           absolutePath,
@@ -276,7 +339,7 @@ export async function observeSkillPackage(
   }
 
   await visit(packageRoot, 0)
-  return { files, observedDigest: skillPackageDigest(files) }
+  return files
 }
 
 /** Require every bundled file identity; tolerate extra agent metadata such as agents/openai.yaml beside unchanged official bytes. */

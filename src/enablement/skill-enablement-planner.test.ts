@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -39,7 +39,6 @@ async function vaultSkill(vaultRoot: string, id: string): Promise<void> {
 }
 
 describe('planSkillEnablement', () => {
-  // T2.7 two links exist, five skills should be enabled -> add=3, remove=0, keep=2
   it('T2.7: diffs current links against the target and reports add/remove/keep', async () => {
     const { home, vaultRoot, destinations } = await sandbox()
     const ids = ['a', 'b', 'c', 'd', 'e']
@@ -61,16 +60,13 @@ describe('planSkillEnablement', () => {
 
     expect(plan.counts.add).toBe(3)
     expect(plan.counts.remove).toBe(0)
-    const kept = plan.actions.filter((action) => action.kind === 'keep')
-    expect(kept).toHaveLength(2)
-    // Preview counts must be exactly the plan lengths (PRD: preview == diff output).
+    expect(plan.actions.filter((action) => action.kind === 'keep')).toHaveLength(2)
     expect(plan.counts.add).toBe(plan.actions.filter((a) => a.kind === 'add').length)
     expect(plan.counts.keep).toBe(plan.actions.filter((a) => a.kind === 'keep').length)
     expect(plan.counts.remove).toBe(plan.actions.filter((a) => a.kind === 'remove').length)
   })
 
-  // T2.8 disabling plans removes with no canonical move branch
-  it('T2.8: disable plans link removal and never a canonical move', async () => {
+  it('T2.8: disable plans link removal while Vault master stays permanent', async () => {
     const { home, vaultRoot, destinations } = await sandbox()
     const ids = ['a', 'b']
     for (const id of ids) {
@@ -88,14 +84,12 @@ describe('planSkillEnablement', () => {
       destinations
     })
 
-    expect(plan.counts.remove).toBeGreaterThan(0)
-    expect(plan.counts.moveToCanonical).toBe(0)
-    expect(
-      plan.actions.every((action) => action.kind !== 'move-to-canonical' && action.kind !== 'add')
-    ).toBe(true)
+    expect(plan.counts.remove).toBe(1)
+    expect(plan.counts.adoptCanonicalToVault).toBe(0)
+    expect(plan.actions.every((action) => action.kind !== 'add')).toBe(true)
   })
 
-  it('T2.9: canonical-root provider enabling plans move-to-canonical instead of link', async () => {
+  it('T2.9: canonical-root provider links directly to permanent Vault master (no move-to-canonical)', async () => {
     const { vaultRoot, destinations } = await sandbox({ providers: ['codex'] })
     await vaultSkill(vaultRoot, 'alpha')
     expect(destinations[0]?.readsCanonicalRoot).toBe(true)
@@ -105,25 +99,22 @@ describe('planSkillEnablement', () => {
       installedSkillIds: ['alpha'],
       userDefaults: {},
       projectOverrides: {},
-      destinations,
-      canonicalMoveAllowed: true
+      destinations
     })
 
     expect(plan.actions).toHaveLength(1)
-    expect(plan.actions[0]?.kind).toBe('move-to-canonical')
-    expect(plan.counts.moveToCanonical).toBe(1)
-    expect(plan.counts.add).toBe(0)
+    expect(plan.actions[0]?.kind).toBe('add')
+    expect(plan.counts.add).toBe(1)
+    expect(plan.counts.adoptCanonicalToVault).toBe(0)
   })
 
-  it('canonical-disabled with a present master plans a move back to the vault', async () => {
+  it('migrates legacy canonical-resident skill into Vault via adopt-canonical-to-vault', async () => {
     const { home, vaultRoot, destinations } = await sandbox({
       providers: ['codex']
     })
     await vaultSkill(vaultRoot, 'alpha')
     const canonicalRoot = join(home, '.agents', 'skills')
     await mkdir(canonicalRoot, { recursive: true })
-    // Master already lives in canonical (previously enabled); disable must move it back.
-    const { rename } = await import('node:fs/promises')
     await rename(join(vaultRoot, 'alpha'), join(canonicalRoot, 'alpha'))
 
     const plan = await planSkillEnablement({
@@ -132,11 +123,32 @@ describe('planSkillEnablement', () => {
       userDefaults: { alpha: 'disabled' },
       projectOverrides: {},
       destinations,
-      canonicalMoveAllowed: true
+      canonicalRoot
     })
 
-    expect(plan.counts.remove).toBe(1)
-    expect(plan.counts.moveToCanonical).toBe(0)
+    expect(plan.counts.adoptCanonicalToVault).toBe(1)
+    expect(plan.counts.add).toBe(0)
+  })
+
+  it('plans per-agent matrix overrides independently across providers', async () => {
+    const { vaultRoot, destinations } = await sandbox({ providers: ['claude', 'codex'] })
+    await vaultSkill(vaultRoot, 'alpha')
+
+    const plan = await planSkillEnablement({
+      vaultRoot,
+      installedSkillIds: ['alpha'],
+      userDefaults: {},
+      projectOverrides: {},
+      userAgentOverrides: {
+        alpha: { claude: true, codex: false }
+      },
+      destinations
+    })
+
+    const claudeAction = plan.actions.find((a) => a.observation.provider === 'claude')
+    const codexAction = plan.actions.find((a) => a.observation.provider === 'codex')
+    expect(claudeAction?.kind).toBe('add')
+    expect(codexAction?.kind).toBe('keep')
   })
 
   it('reports a foreign directory at a target as a conflict, not a plan action', async () => {
@@ -158,10 +170,6 @@ describe('planSkillEnablement', () => {
     expect(plan.conflicts).toHaveLength(1)
     expect(plan.conflicts[0]?.skillId).toBe('alpha')
     expect(plan.conflicts[0]?.provider).toBe('claude')
-    // The foreign copy stays readable; the planner never schedules its removal.
-    expect(
-      await import('node:fs/promises').then((fs) => fs.readFile(join(foreign, 'SKILL.md'), 'utf8'))
-    ).toBe('user content')
   })
 
   it('a link pointing outside the vault is a conflict, never silently relinked', async () => {

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stablyai/orca/main/docs/schemas/plugins/orca-plugin.v2.schema.json",
+  "manifestVersion": 2,
+  "id": "skills-manager",
+  "name": "Skills Manager",
+  "version": "0.2.0",
+  "description": "Unified Skills Vault, Packs, Marketplace & Read-Only Plugin Skills workbench across all PMStudio agents.",
+  "execution": "sandboxed-ui",
+  "engines": {
+    "orca": ">=1.4.274"
+  },
+  "capabilities": [
+    { "kind": "workspace:read" },
+    { "kind": "agent:read" },
+    { "kind": "settings:own" },
+    { "kind": "storage:own" }
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "skills-workbench",
+        "title": "Skills Manager",
+        "icon": "layers",
+        "entry": "ui/skills-page.html",
+        "ui": "html",
+        "sidebar": {
+          "placement": "primary",
+          "order": 100
+        },
+        "layout": "full-page"
+      }
+    ],
+    "panels": [
+      {
+        "id": "skills-quick-toggle",
+        "title": "Skills Quick Toggle",
+        "icon": "layers",
+        "entry": "ui/skills-panel.html",
+        "ui": "html"
+      }
+    ]
+  }
+}

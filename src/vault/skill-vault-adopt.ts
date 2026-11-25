@@ -1,10 +1,16 @@
 import { randomUUID } from 'node:crypto'
-import { cp, lstat, mkdir, readFile, realpath, rm, symlink } from 'node:fs/promises'
+import { cp, lstat, mkdir, readFile, realpath, rm, stat, symlink } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
-import type { SkillVaultIndex } from '../contracts/skill-vault-contract'
-import { SKILL_VAULT_STAGE_MARKER } from './staging-marker'
-import { renameSkillPathWithWindowsRetry } from '../infra/skill-filesystem-retry'
+import {
+  classifyCopyModePlacement,
+  type ManagedPlacementRecord,
+  type SkillVaultIndex
+} from '../contracts/skill-vault-contract'
 import { summarizeSkillMarkdown } from '../contracts/skill-metadata'
+import { nativeSkillPathSemantics, normalizedSkillPath } from '../contracts/skill-path-containment'
+import { assertWritableSkillTarget } from '../infra/readonly-root-fence'
+import { renameSkillPathWithWindowsRetry } from '../infra/skill-filesystem-retry'
+import { SKILL_VAULT_STAGE_MARKER } from './staging-marker'
 import {
   computeSkillVaultDigest,
   detectSkillVaultCopyMode,
@@ -13,10 +19,6 @@ import {
   skillVaultSizeBytes
 } from './skill-vault-index-service'
 import { skillVaultEntryRoot } from './skill-vault-paths'
-
-// ② adopt transaction (PRD §8 1.5): stage everything first, then move primaries
-// into the vault, replace origins with symlinks, and write the index last. Any
-// failure rolls the whole batch back to the pre-run tree.
 
 export type SkillVaultAdoptOutcome = {
   adopted: { id: string; vaultPath: string; originPath: string; merged: string[] }[]
@@ -74,7 +76,7 @@ async function createVaultLink(
   await filesystem.symlink(relative(realOriginParent, realVaultPath), originPath, 'dir')
 }
 
-type AdoptedRecord = {
+export type AdoptedRecord = {
   id: string
   vaultPath: string
   originPath: string
@@ -84,27 +86,145 @@ type AdoptedRecord = {
   description: string | null
   sizeBytes: number
   installedAt: string
+  managedPlacements: Record<string, ManagedPlacementRecord>
 }
 
+/**
+ * Single-skill atomic adoption unit: stages, moves primary into Vault, links/copies origins,
+ * and rolls back ONLY this skill if any step fails.
+ */
+export async function adoptSingleSkillUnit(input: {
+  vaultRoot: string
+  item: SkillVaultAdoptItemInput
+  copyMode: boolean
+  installedAt?: string
+  readonlyRoots?: readonly string[]
+  filesystem?: SkillVaultAdoptFilesystem
+}): Promise<AdoptedRecord> {
+  const filesystem = input.filesystem ?? nativeSkillVaultAdoptFilesystem
+  const semantics = nativeSkillPathSemantics()
+  const { item } = input
+  const allOrigins = [item.originPath, ...item.mergePaths]
+  for (const origin of allOrigins) {
+    await assertWritableSkillTarget(origin, { readonlyRoots: input.readonlyRoots, semantics })
+  }
+  const vaultPath = skillVaultEntryRoot(input.vaultRoot, item.id)
+  await assertWritableSkillTarget(vaultPath, { readonlyRoots: input.readonlyRoots, semantics })
+
+  const staged = new Map<string, string>()
+  let movedToVault = false
+  const linked: string[] = []
+
+  const rollback = async (): Promise<void> => {
+    for (const originPath of linked.toReversed()) {
+      await filesystem.remove(originPath).catch(() => undefined)
+    }
+    if (movedToVault) {
+      await filesystem.rename(vaultPath, item.originPath).catch(() => undefined)
+    }
+    for (const [originPath, stagePath] of [...staged.entries()].toReversed()) {
+      if (!(movedToVault && originPath === item.originPath)) {
+        await filesystem.rename(stagePath, originPath).catch(() => undefined)
+      }
+      await filesystem.remove(stagePath).catch(() => undefined)
+    }
+  }
+
+  try {
+    for (const originPath of allOrigins) {
+      const stagePath = stagePathFor(originPath)
+      await filesystem.rename(originPath, stagePath)
+      staged.set(originPath, stagePath)
+    }
+
+    const primaryStage = staged.get(item.originPath)
+    if (!primaryStage) {
+      throw new Error(`skill-vault-missing-stage: ${item.id}`)
+    }
+    await filesystem.mkdir(dirname(vaultPath))
+    await filesystem.rename(primaryStage, vaultPath)
+    movedToVault = true
+
+    for (const originPath of allOrigins) {
+      if (input.copyMode) {
+        await filesystem.copyTree(vaultPath, originPath)
+      } else {
+        await createVaultLink(vaultPath, originPath, filesystem)
+      }
+      linked.push(originPath)
+    }
+
+    // Clean up duplicate merge staging dirs only after links/copies succeed.
+    for (const mergePath of item.mergePaths) {
+      const mergeStage = staged.get(mergePath)
+      if (mergeStage) {
+        await filesystem.remove(mergeStage).catch(() => undefined)
+      }
+    }
+
+    const markdown = await filesystem.readFile(join(vaultPath, 'SKILL.md')).catch(() => '')
+    const summary = summarizeSkillMarkdown(markdown)
+    const digest = await computeSkillVaultDigest(vaultPath)
+    const sizeBytes = await skillVaultSizeBytes(vaultPath).catch(() => 0)
+    const now = new Date().toISOString()
+
+    const managedPlacements: Record<string, ManagedPlacementRecord> = {}
+    const topology = input.copyMode
+      ? 'copy'
+      : process.platform === 'win32'
+        ? 'junction'
+        : 'symlink'
+    for (const originPath of allOrigins) {
+      const originStat = await stat(originPath).catch(() => null)
+      managedPlacements[normalizedSkillPath(originPath, semantics)] = {
+        topology,
+        syncedDigest: digest,
+        ...(originStat ? { syncedMtimeMs: originStat.mtimeMs } : {})
+      }
+    }
+
+    return {
+      id: item.id,
+      vaultPath,
+      originPath: item.originPath,
+      mergePaths: [...item.mergePaths],
+      digest,
+      name: summary.name ?? item.id,
+      description: summary.description,
+      sizeBytes,
+      installedAt: input.installedAt ?? now,
+      managedPlacements
+    }
+  } catch (error) {
+    await rollback()
+    throw error
+  }
+}
+
+/** Batch-atomic adopt (legacy contract preserved: any failure rolls back all items in the batch). */
 export async function adoptSkillsIntoVault(input: {
   homeDirectory: string
   vaultRoot: string
   indexPath: string
   items: readonly SkillVaultAdoptItemInput[]
+  readonlyRoots?: readonly string[]
   filesystem?: SkillVaultAdoptFilesystem
 }): Promise<SkillVaultAdoptOutcome> {
   const filesystem = input.filesystem ?? nativeSkillVaultAdoptFilesystem
+  const semantics = nativeSkillPathSemantics()
+  for (const item of input.items) {
+    for (const origin of [item.originPath, ...item.mergePaths]) {
+      await assertWritableSkillTarget(origin, { readonlyRoots: input.readonlyRoots, semantics })
+    }
+  }
   const copyMode = await detectSkillVaultCopyMode(input.vaultRoot)
   await filesystem.mkdir(input.vaultRoot)
 
-  // Every origin (primary + merges) stages first; rollback restores by stage
-  // or by vault path depending on how far the batch progressed.
   const staged = new Map<string, string>()
-  const movedToVault = new Map<string, string>() // originPath -> vaultPath
+  const movedToVault = new Map<string, string>()
   const linked: string[] = []
 
   const rollback = async (): Promise<void> => {
-    // Reverse order: drop replacement links, move vault copies back, drop stages.
     for (const originPath of linked.toReversed()) {
       await filesystem.remove(originPath).catch(() => undefined)
     }
@@ -120,7 +240,6 @@ export async function adoptSkillsIntoVault(input: {
   }
 
   try {
-    // Phase 1: stage every origin and duplicate so the tree is frozen batch-wide.
     for (const item of input.items) {
       for (const originPath of [item.originPath, ...item.mergePaths]) {
         const stagePath = stagePathFor(originPath)
@@ -129,7 +248,6 @@ export async function adoptSkillsIntoVault(input: {
       }
     }
 
-    // Phase 2: move the primary stages into the vault.
     for (const item of input.items) {
       const stagePath = staged.get(item.originPath)
       if (!stagePath) {
@@ -141,7 +259,6 @@ export async function adoptSkillsIntoVault(input: {
       movedToVault.set(item.originPath, vaultPath)
     }
 
-    // Phase 3: replace every origin with a link (or copy) at the vault primary.
     for (const item of input.items) {
       const vaultPath = skillVaultEntryRoot(input.vaultRoot, item.id)
       for (const originPath of [item.originPath, ...item.mergePaths]) {
@@ -153,24 +270,49 @@ export async function adoptSkillsIntoVault(input: {
       }
     }
 
-    // Phase 4: write the index last; the filesystem is already the source of truth.
+    for (const item of input.items) {
+      for (const mergePath of item.mergePaths) {
+        const mergeStage = staged.get(mergePath)
+        if (mergeStage) {
+          await filesystem.remove(mergeStage).catch(() => undefined)
+        }
+      }
+    }
+
     const previous = await readSkillVaultIndex(input.indexPath)
     const now = new Date().toISOString()
     const records: AdoptedRecord[] = []
+    const topology = copyMode
+      ? 'copy'
+      : process.platform === 'win32'
+        ? 'junction'
+        : 'symlink'
+
     for (const item of input.items) {
       const vaultPath = skillVaultEntryRoot(input.vaultRoot, item.id)
       const markdown = await filesystem.readFile(join(vaultPath, 'SKILL.md')).catch(() => '')
       const summary = summarizeSkillMarkdown(markdown)
+      const digest = await computeSkillVaultDigest(vaultPath)
+      const managedPlacements: Record<string, ManagedPlacementRecord> = {}
+      for (const originPath of [item.originPath, ...item.mergePaths]) {
+        const originStat = await stat(originPath).catch(() => null)
+        managedPlacements[normalizedSkillPath(originPath, semantics)] = {
+          topology,
+          syncedDigest: digest,
+          ...(originStat ? { syncedMtimeMs: originStat.mtimeMs } : {})
+        }
+      }
       records.push({
         id: item.id,
         vaultPath,
         originPath: item.originPath,
         mergePaths: [...item.mergePaths],
-        digest: await computeSkillVaultDigest(vaultPath),
+        digest,
         name: summary.name ?? item.id,
         description: summary.description,
         sizeBytes: await skillVaultSizeBytes(vaultPath).catch(() => 0),
-        installedAt: previous?.entries.find((entry) => entry.id === item.id)?.installedAt ?? now
+        installedAt: previous?.entries.find((entry) => entry.id === item.id)?.installedAt ?? now,
+        managedPlacements
       })
     }
 
@@ -197,7 +339,7 @@ export async function adoptSkillsIntoVault(input: {
   }
 }
 
-function toIndexEntry(
+export function toIndexEntry(
   record: AdoptedRecord,
   now: string,
   copyMode: boolean
@@ -215,8 +357,123 @@ function toIndexEntry(
     author: null,
     installedAt: record.installedAt,
     updatedAt: now,
-    ...(copyMode ? { copyMode: true } : {})
+    ...(copyMode ? { copyMode: true } : {}),
+    ...(Object.keys(record.managedPlacements).length > 0
+      ? { managedPlacements: record.managedPlacements }
+      : {})
   }
+}
+
+/** Promote a drifted copyMode placement into Vault (updating Vault master & syncedDigest). */
+export async function promoteCopyModeToVault(input: {
+  vaultRoot: string
+  indexPath: string
+  id: string
+  placementPath: string
+  readonlyRoots?: readonly string[]
+}): Promise<SkillVaultIndex> {
+  const semantics = nativeSkillPathSemantics()
+  await assertWritableSkillTarget(input.placementPath, {
+    readonlyRoots: input.readonlyRoots,
+    semantics
+  })
+  const vaultPath = skillVaultEntryRoot(input.vaultRoot, input.id)
+  await assertWritableSkillTarget(vaultPath, { readonlyRoots: input.readonlyRoots, semantics })
+
+  const index = await readSkillVaultIndex(input.indexPath)
+  const entry = index?.entries.find((item) => item.id === input.id)
+  if (!entry) {
+    throw new Error(`skill-vault-unknown-entry: ${input.id}`)
+  }
+
+  const stage = stagePathFor(vaultPath)
+  await cp(input.placementPath, stage, { recursive: true, verbatimSymlinks: true })
+  const backup = stagePathFor(vaultPath)
+  await renameSkillPathWithWindowsRetry(vaultPath, backup)
+  try {
+    await renameSkillPathWithWindowsRetry(stage, vaultPath)
+    await rm(backup, { recursive: true, force: true }).catch(() => undefined)
+  } catch (error) {
+    await renameSkillPathWithWindowsRetry(backup, vaultPath).catch(() => undefined)
+    await rm(stage, { recursive: true, force: true }).catch(() => undefined)
+    throw error
+  }
+
+  const newDigest = await computeSkillVaultDigest(vaultPath)
+  const newSize = await skillVaultSizeBytes(vaultPath).catch(() => entry.sizeBytes)
+  const markdown = await readFile(join(vaultPath, 'SKILL.md'), 'utf8').catch(() => '')
+  const summary = summarizeSkillMarkdown(markdown)
+  const placementKey = normalizedSkillPath(input.placementPath, semantics)
+  const placementStat = await stat(input.placementPath).catch(() => null)
+  const updatedEntries = index!.entries.map((item) =>
+    item.id !== input.id
+      ? item
+      : {
+          ...item,
+          name: summary.name ?? item.name,
+          description: summary.description,
+          digest: newDigest,
+          sizeBytes: newSize,
+          updatedAt: new Date().toISOString(),
+          managedPlacements: {
+            ...(item.managedPlacements ?? {}),
+            [placementKey]: {
+              topology: 'copy' as const,
+              syncedDigest: newDigest,
+              ...(placementStat ? { syncedMtimeMs: placementStat.mtimeMs } : {})
+            }
+          }
+        }
+  )
+  return rebuildSkillVaultIndex(input.indexPath, updatedEntries)
+}
+
+/** Reset a drifted/outdated copyMode placement from the authoritative Vault master. */
+export async function resetCopyModeFromVault(input: {
+  vaultRoot: string
+  indexPath: string
+  id: string
+  placementPath: string
+  readonlyRoots?: readonly string[]
+}): Promise<SkillVaultIndex> {
+  const semantics = nativeSkillPathSemantics()
+  await assertWritableSkillTarget(input.placementPath, {
+    readonlyRoots: input.readonlyRoots,
+    semantics
+  })
+  const vaultPath = skillVaultEntryRoot(input.vaultRoot, input.id)
+  const index = await readSkillVaultIndex(input.indexPath)
+  const entry = index?.entries.find((item) => item.id === input.id)
+  if (!entry) {
+    throw new Error(`skill-vault-unknown-entry: ${input.id}`)
+  }
+
+  const stage = stagePathFor(input.placementPath)
+  await cp(vaultPath, stage, { recursive: true, verbatimSymlinks: true })
+  await rm(input.placementPath, { recursive: true, force: true })
+  await renameSkillPathWithWindowsRetry(stage, input.placementPath)
+
+  const vaultDigest = await computeSkillVaultDigest(vaultPath)
+  const placementKey = normalizedSkillPath(input.placementPath, semantics)
+  const placementStat = await stat(input.placementPath).catch(() => null)
+  const updatedEntries = index!.entries.map((item) =>
+    item.id !== input.id
+      ? item
+      : {
+          ...item,
+          digest: vaultDigest,
+          updatedAt: new Date().toISOString(),
+          managedPlacements: {
+            ...(item.managedPlacements ?? {}),
+            [placementKey]: {
+              topology: 'copy' as const,
+              syncedDigest: vaultDigest,
+              ...(placementStat ? { syncedMtimeMs: placementStat.mtimeMs } : {})
+            }
+          }
+        }
+  )
+  return rebuildSkillVaultIndex(input.indexPath, updatedEntries)
 }
 
 /** Cancel management for one entry: move the primary back and drop its links. */
@@ -226,9 +483,12 @@ export async function unadoptSkillFromVault(input: {
   id: string
   /** Additional link locations to clear beyond the recorded origin. */
   extraLinkPaths?: readonly string[]
+  readonlyRoots?: readonly string[]
+  force?: boolean
   filesystem?: SkillVaultAdoptFilesystem
 }): Promise<{ originPath: string }> {
   const filesystem = input.filesystem ?? nativeSkillVaultAdoptFilesystem
+  const semantics = nativeSkillPathSemantics()
   const index = await readSkillVaultIndex(input.indexPath)
   const entry = index?.entries.find((candidate) => candidate.id === input.id)
   if (!entry) {
@@ -236,31 +496,52 @@ export async function unadoptSkillFromVault(input: {
   }
   const vaultPath = skillVaultEntryRoot(input.vaultRoot, input.id)
   const originPath = entry.originPath ?? join(dirname(vaultPath), 'restored', input.id)
+  await assertWritableSkillTarget(originPath, { readonlyRoots: input.readonlyRoots, semantics })
 
-  // Recorded linkPaths cover every replaced origin (primary + merged copies).
   const linkPaths = [
     ...new Set([originPath, ...(entry.linkPaths ?? []), ...(input.extraLinkPaths ?? [])])
   ]
+  for (const linkPath of linkPaths) {
+    await assertWritableSkillTarget(linkPath, { readonlyRoots: input.readonlyRoots, semantics })
+  }
+
   const removed: string[] = []
   try {
     await filesystem.mkdir(dirname(originPath))
     for (const linkPath of linkPaths) {
-      if ((await filesystem.lstat(linkPath))?.isSymbolicLink()) {
+      const linkStat = await filesystem.lstat(linkPath)
+      if (!linkStat) {
+        continue
+      }
+      if (linkStat.isSymbolicLink()) {
+        await filesystem.remove(linkPath)
+        removed.push(linkPath)
+        continue
+      }
+      // In copyMode, protect drifted local edits unless explicitly forced.
+      const placement = entry.managedPlacements?.[normalizedSkillPath(linkPath, semantics)]
+      if (placement?.topology === 'copy') {
+        const observedDigest = await computeSkillVaultDigest(linkPath).catch(() => null)
+        const state = classifyCopyModePlacement({
+          vaultDigest: entry.digest,
+          observedDigest,
+          placement
+        })
+        if (state === 'managed-copy-drifted' && !input.force) {
+          throw new Error(`skill-copy-mode-drifted: ${linkPath}`)
+        }
         await filesystem.remove(linkPath)
         removed.push(linkPath)
       }
     }
     await filesystem.rename(vaultPath, originPath)
   } catch (error) {
-    // Restore links already dropped before the primary move failed.
     for (const linkPath of removed.toReversed()) {
       await createVaultLink(vaultPath, linkPath, filesystem).catch(() => undefined)
     }
     throw error
   }
 
-  // Merged duplicates were byte-identical; restore them as copies of the
-  // returned primary so every pre-adoption location holds the skill again.
   for (const linkPath of removed) {
     if (linkPath === originPath) {
       continue

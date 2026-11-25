@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.summarizeSkillMarkdown = summarizeSkillMarkdown;
+exports.declaredSkillMetadata = declaredSkillMetadata;
 function stripQuotePair(value) {
     const trimmed = value.trim();
     if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
@@ -95,4 +96,19 @@ function summarizeSkillMarkdown(markdown) {
         name: name || null,
         description: description || null
     };
+}
+/** The name and description a SKILL.md declares in frontmatter; null when either is missing, so
+ *  arbitrary text never stands in for them. */
+function declaredSkillMetadata(markdown) {
+    const match = /^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/.exec(markdown.replace(/^\uFEFF/, ''));
+    if (!match) {
+        return null;
+    }
+    const { name, description } = parseYamlFrontmatter(match[1]);
+    return typeof name === 'string' &&
+        name.trim() &&
+        typeof description === 'string' &&
+        description.trim()
+        ? { name: name.trim(), description: description.trim() }
+        : null;
 }

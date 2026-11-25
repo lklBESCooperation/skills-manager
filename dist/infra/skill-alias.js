@@ -2,8 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createNativeSkillAlias = createNativeSkillAlias;
 // Ported createNativeSkillAlias from src/main/skills/skill-placement-reconciliation.ts
-// (upstream-shared); only this alias primitive is needed by the enablement
-// journal. Re-sync on upstream placement edits.
+// (upstream-shared); preserves Vault master symlinks without dereferencing the master itself.
 const promises_1 = require("node:fs/promises");
 const node_path_1 = require("node:path");
 async function createNativeSkillAlias(canonicalPath, destinationPath) {
@@ -14,6 +13,7 @@ async function createNativeSkillAlias(canonicalPath, destinationPath) {
         return;
     }
     const realParent = await (0, promises_1.realpath)(parent).catch(() => (0, node_path_1.resolve)(parent));
-    const realCanonical = await (0, promises_1.realpath)(canonicalPath);
-    await (0, promises_1.symlink)((0, node_path_1.relative)(realParent, realCanonical), destinationPath, 'dir');
+    const realCanonicalParent = await (0, promises_1.realpath)((0, node_path_1.dirname)(canonicalPath)).catch(() => (0, node_path_1.resolve)((0, node_path_1.dirname)(canonicalPath)));
+    const targetPath = (0, node_path_1.join)(realCanonicalParent, (0, node_path_1.basename)(canonicalPath));
+    await (0, promises_1.symlink)((0, node_path_1.relative)(realParent, targetPath), destinationPath, 'dir');
 }

@@ -7,22 +7,26 @@ const node_path_1 = require("node:path");
 const skill_enablement_1 = require("../contracts/skill-enablement");
 Object.defineProperty(exports, "resolveEffectiveSkills", { enumerable: true, get: function () { return skill_enablement_1.resolveEffectiveSkills; } });
 const skill_path_containment_1 = require("../contracts/skill-path-containment");
-/** lstat semantics: a link that points anywhere still reports as a link; resolve for target compare. */
+const skill_vault_contract_1 = require("../contracts/skill-vault-contract");
+const readonly_root_fence_1 = require("../infra/readonly-root-fence");
+const skill_vault_index_service_1 = require("../vault/skill-vault-index-service");
 async function observePlacement(skillId, destination) {
     const destinationPath = (0, node_path_1.join)(destination.rootPath, skillId);
-    const stat = await (0, promises_1.lstat)(destinationPath).catch(() => null);
-    if (!stat) {
+    const entryStat = await (0, promises_1.lstat)(destinationPath).catch(() => null);
+    if (!entryStat) {
         return {
             skillId,
             provider: destination.provider,
             rootPath: destination.rootPath,
             linkTarget: null,
             exists: false,
-            readsCanonicalRoot: destination.readsCanonicalRoot
+            readsCanonicalRoot: destination.readsCanonicalRoot,
+            isSymbolicLink: false
         };
     }
     let linkTarget = null;
-    if (stat.isSymbolicLink()) {
+    const isSym = entryStat.isSymbolicLink();
+    if (isSym) {
         const raw = await (0, promises_1.readlink)(destinationPath).catch(() => null);
         if (raw !== null) {
             linkTarget = (0, node_path_1.resolve)(destination.rootPath, raw);
@@ -34,28 +38,37 @@ async function observePlacement(skillId, destination) {
         rootPath: destination.rootPath,
         linkTarget,
         exists: true,
-        readsCanonicalRoot: destination.readsCanonicalRoot
+        readsCanonicalRoot: destination.readsCanonicalRoot,
+        isSymbolicLink: isSym
     };
 }
-function isMasterLink(observation, masterPath) {
+function isVaultMasterLink(observation, vaultMasterPath) {
     if (!observation.linkTarget) {
         return false;
     }
-    return (0, skill_path_containment_1.skillPathsEqual)(observation.linkTarget, masterPath, (0, skill_path_containment_1.nativeSkillPathSemantics)());
+    return (0, skill_path_containment_1.skillPathsEqual)(observation.linkTarget, vaultMasterPath, (0, skill_path_containment_1.nativeSkillPathSemantics)());
 }
 /**
- * Diff actual per-provider placement against the resolved target. Non-canonical roots plan a
- * link (add), unlink (remove), or keep; canonical-root providers plan a master move instead.
+ * Vault is the permanent single master (`<vaultRoot>/<skillId>`). Both canonical `.agents/skills`
+ * and private provider roots receive symlinks/junctions (or tracked `copyMode` copies) pointing at
+ * Vault. Legacy canonical-resident masters emit a one-time `adopt-canonical-to-vault` action.
  */
 async function planSkillEnablement(input) {
+    const semantics = (0, skill_path_containment_1.nativeSkillPathSemantics)();
     const resolution = (0, skill_enablement_1.resolveEffectiveSkills)({
         installed: input.installedSkillIds,
         userDefaults: input.userDefaults,
-        projectOverrides: input.projectOverrides
+        projectOverrides: input.projectOverrides,
+        userAgentOverrides: input.userAgentOverrides,
+        projectAgentOverrides: input.projectAgentOverrides,
+        scope: input.scope ?? 'global'
     });
     const actions = [];
     const conflicts = [];
+    const readonlyBlocked = [];
     const masters = await locateSkillMasters(input.installedSkillIds, input.vaultRoot, input.canonicalRoot);
+    const indexById = new Map((input.vaultIndex?.entries ?? []).map((entry) => [entry.id, entry]));
+    const migratedInPlan = new Set();
     for (const destination of input.destinations) {
         for (const skillId of input.installedSkillIds) {
             const target = resolution.get(skillId);
@@ -63,35 +76,70 @@ async function planSkillEnablement(input) {
                 continue;
             }
             const observation = await observePlacement(skillId, destination);
-            if (destination.readsCanonicalRoot && input.canonicalMoveAllowed) {
-                // Canonical holds masters for this provider; enable=master present, disable=absent.
-                const canonicalEnabled = observation.exists;
-                if (target.effective === 'enabled') {
-                    actions.push(canonicalEnabled
-                        ? { kind: 'keep', observation }
-                        : { kind: 'move-to-canonical', observation });
-                }
-                else if (canonicalEnabled) {
-                    actions.push({ kind: 'remove', observation });
-                }
-                else {
-                    actions.push({ kind: 'keep', observation });
+            const destinationPath = (0, node_path_1.join)(destination.rootPath, skillId);
+            if (await (0, readonly_root_fence_1.isReadonlySkillTarget)(destinationPath, {
+                readonlyRoots: input.readonlyRoots,
+                semantics
+            })) {
+                readonlyBlocked.push(observation);
+                continue;
+            }
+            const master = masters[skillId];
+            const vaultMasterPath = (0, node_path_1.join)(input.vaultRoot, skillId);
+            const effectiveForProvider = (0, skill_enablement_1.isSkillEffectiveForAgent)(target, destination.provider);
+            // One-time migration when a skill master still sits in canonical without a Vault copy.
+            if (destination.readsCanonicalRoot &&
+                master?.location === 'canonical' &&
+                !migratedInPlan.has(skillId) &&
+                observation.exists) {
+                migratedInPlan.add(skillId);
+                actions.push({ kind: 'adopt-canonical-to-vault', observation });
+                if (effectiveForProvider) {
+                    actions.push({ kind: 'add', observation, copyMode: input.copyMode });
                 }
                 continue;
             }
-            // Compare against the master's real current location so a valid link is never
-            // misread as foreign after a canonical provider moved it out of the vault.
-            const linked = isMasterLink(observation, masterLinkTarget(input, skillId, masters));
-            if (observation.exists && !linked) {
-                // A foreign directory/file owns the name; never delete or overwrite it.
+            const linkedToVault = isVaultMasterLink(observation, vaultMasterPath);
+            // Handle copyMode placements via 3-way digest protection (Q6).
+            if (observation.exists && !observation.isSymbolicLink && input.copyMode) {
+                const entry = indexById.get(skillId);
+                const placement = entry?.managedPlacements?.[(0, skill_path_containment_1.normalizedSkillPath)(destinationPath, semantics)];
+                if (entry && placement?.topology === 'copy') {
+                    const observedDigest = await (0, skill_vault_index_service_1.computeSkillVaultDigest)(destinationPath).catch(() => null);
+                    const copyState = (0, skill_vault_contract_1.classifyCopyModePlacement)({
+                        vaultDigest: entry.digest,
+                        observedDigest,
+                        placement
+                    });
+                    if (copyState === 'managed-copy-drifted') {
+                        // Drifted local edits are protected; never auto-delete or overwrite!
+                        conflicts.push(observation);
+                        continue;
+                    }
+                    if (effectiveForProvider) {
+                        actions.push(copyState === 'managed-copy-outdated'
+                            ? { kind: 'refresh-copy', observation }
+                            : { kind: 'keep', observation });
+                    }
+                    else {
+                        actions.push({ kind: 'remove', observation, copyMode: true });
+                    }
+                    continue;
+                }
+            }
+            if (observation.exists && !linkedToVault) {
                 conflicts.push(observation);
                 continue;
             }
-            if (target.effective === 'enabled') {
-                actions.push(linked ? { kind: 'keep', observation } : { kind: 'add', observation });
+            if (effectiveForProvider) {
+                actions.push(linkedToVault
+                    ? { kind: 'keep', observation }
+                    : { kind: 'add', observation, copyMode: input.copyMode });
             }
             else {
-                actions.push(linked ? { kind: 'remove', observation } : { kind: 'keep', observation });
+                actions.push(linkedToVault
+                    ? { kind: 'remove', observation, copyMode: input.copyMode }
+                    : { kind: 'keep', observation });
             }
         }
     }
@@ -99,18 +147,12 @@ async function planSkillEnablement(input) {
         add: actions.filter((action) => action.kind === 'add').length,
         remove: actions.filter((action) => action.kind === 'remove').length,
         keep: actions.filter((action) => action.kind === 'keep').length,
-        moveToCanonical: actions.filter((action) => action.kind === 'move-to-canonical').length,
+        refreshCopy: actions.filter((action) => action.kind === 'refresh-copy').length,
+        adoptCanonicalToVault: actions.filter((action) => action.kind === 'adopt-canonical-to-vault')
+            .length,
         removeCanonical: actions.filter((action) => action.kind === 'remove' && action.observation.readsCanonicalRoot).length
     };
-    return { actions, counts, conflicts, masters };
-}
-/** The link for a non-canonical provider must follow the master wherever it currently lives. */
-function masterLinkTarget(input, skillId, masters) {
-    const master = masters[skillId];
-    if (master?.location === 'canonical' && input.canonicalRoot) {
-        return (0, node_path_1.join)(input.canonicalRoot, skillId);
-    }
-    return (0, node_path_1.join)(input.vaultRoot, skillId);
+    return { actions, counts, conflicts, readonlyBlocked, masters };
 }
 async function locateSkillMasters(skillIds, vaultRoot, canonicalRoot) {
     const masters = {};

@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.emptySkillVaultIndex = void 0;
 exports.readSkillVaultIndex = readSkillVaultIndex;
+exports.readSkillVaultIndexWithLegacyFallback = readSkillVaultIndexWithLegacyFallback;
 exports.writeSkillVaultIndex = writeSkillVaultIndex;
 exports.rebuildSkillVaultIndex = rebuildSkillVaultIndex;
 exports.computeSkillVaultDigest = computeSkillVaultDigest;
@@ -20,6 +21,14 @@ async function readSkillVaultIndex(indexPath) {
     const raw = await (0, promises_1.readFile)(indexPath, 'utf8').catch(() => null);
     // A corrupt index is derived state: degrade to null and let the caller rebuild.
     return raw === null ? null : (0, skill_vault_contract_1.salvageSkillVaultIndex)(raw);
+}
+/** Reads the symmetric index path first, falling back read-only to the legacy v0.1 path if present. */
+async function readSkillVaultIndexWithLegacyFallback(indexPath, legacyIndexPath) {
+    const primary = await readSkillVaultIndex(indexPath);
+    if (primary !== null || !legacyIndexPath) {
+        return primary;
+    }
+    return readSkillVaultIndex(legacyIndexPath);
 }
 async function writeSkillVaultIndex(indexPath, index) {
     await (0, promises_1.mkdir)((0, node_path_1.dirname)(indexPath), { recursive: true, mode: 0o700 });

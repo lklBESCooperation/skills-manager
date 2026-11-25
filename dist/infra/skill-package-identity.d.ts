@@ -30,7 +30,14 @@ type SkillPackageObservationLimits = {
 };
 export declare function describeObservedSkillFile(path: string, bytes: Buffer, executable: boolean): ObservedSkillFile;
 export declare function skillPackageDigest(files: readonly SkillBundleFileIdentity[]): string;
-export declare function observeSkillPackage(packageRoot: string, limits?: SkillPackageObservationLimits, executablePaths?: ReadonlySet<string>, signal?: AbortSignal, platform?: NodeJS.Platform, inferShebangExecutables?: boolean): Promise<ObservedSkillPackage>;
+export declare function observeSkillPackage(packageRoot: string, limits?: SkillPackageObservationLimits, executablePaths?: ReadonlySet<string>, signal?: AbortSignal, platform?: NodeJS.Platform, inferShebangExecutables?: boolean, 
+/** A folder this answers true for is left out unread: none of its files count against the limits. */
+skipDirectory?: (absolutePath: string) => Promise<boolean>): Promise<ObservedSkillPackage>;
+/**
+ * Throws what observeSkillPackage would for this folder's shape (links, special files, depth, counts,
+ * sizes by lstat), without reading or hashing its files (`skipDirectory` may read what it needs).
+ */
+export declare function checkSkillPackageShape(packageRoot: string, limits?: SkillPackageObservationLimits, skipDirectory?: (absolutePath: string) => Promise<boolean>, signal?: AbortSignal): Promise<void>;
 /** Require every bundled file identity; tolerate extra agent metadata such as agents/openai.yaml beside unchanged official bytes. */
 export declare function matchesBundledSkillFiles(observed: ObservedSkillPackage, expectedFiles: readonly SkillBundleFileIdentity[]): boolean;
 export {};

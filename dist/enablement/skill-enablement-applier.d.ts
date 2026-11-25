@@ -1,4 +1,4 @@
-import { type EffectiveSkillResolution, type SkillEnablementSalvage, type SkillProjectOverrides, type SkillUserDefaults } from '../contracts/skill-enablement';
+import { type AgentId, type EffectiveSkillResolution, type SkillAgentOverrides, type SkillEnablementSalvage, type SkillProjectOverrides, type SkillUserDefaults } from '../contracts/skill-enablement';
 import { type SkillProviderRootOverrides } from '../infra/skill-provider-destinations';
 import { type EnablementBoundedFileReader, type ExecutedEnablementStep } from './skill-enablement-journal';
 import { type SkillEnablementPlan } from './skill-enablement-planner';
@@ -12,6 +12,8 @@ export type SkillEnablementCommand = {
     kind: 'enable' | 'disable';
     skillIds: readonly string[];
     scope: 'user' | 'project';
+    /** Optional per-agent overrides (`agents?: Record<AgentId, boolean>`) applied to each listed skill. */
+    agents?: Partial<Record<AgentId, boolean>>;
 }
 /** Project-level only: delete the override key and re-place from the resolution. */
  | {
@@ -24,11 +26,15 @@ export type SkillEnablementRuntimeInput = {
     workspaceDirectory?: string;
     /** Injected vault root; P1 owns the real layout (`~/.pmstudio/skills`), tests build fakes. */
     vaultRoot: string;
+    /** Optional vault index path; when supplied, tracks copyMode `managedPlacements`. */
+    indexPath?: string;
     /** Journal location for the placement batch; defaults beside the state files. */
     stateDirectory: string;
     detectedProviders: readonly string[];
     selectedProviders?: readonly string[];
     providerRootOverrides?: SkillProviderRootOverrides;
+    readonlyRoots?: readonly string[];
+    copyMode?: boolean;
     /** Host-injected file IO; the CLI entry binds the app's shared implementations. */
     fileIO: SkillEnablementFileIO;
 };
@@ -36,6 +42,11 @@ export type SkillEnablementResult = {
     status: 'applied' | 'conflict' | 'partial';
     executed: ExecutedEnablementStep[];
     conflicts: {
+        skillId: string;
+        provider: string;
+        rootPath: string;
+    }[];
+    readonlyBlocked: {
         skillId: string;
         provider: string;
         rootPath: string;
@@ -67,11 +78,14 @@ export declare function runSkillEnablementCommand(input: {
 /** The read-only view behind `pms skills effective`: resolution plus placement reality. */
 export declare function readSkillEnablementState(input: {
     runtime: SkillEnablementRuntimeInput;
+    includeAgents?: boolean;
 }): Promise<{
     resolution: Map<string, EffectiveSkillResolution>;
     installedSkillIds: string[];
     userDefaults: SkillUserDefaults;
     projectOverrides: SkillProjectOverrides;
+    userAgentOverrides?: SkillAgentOverrides;
+    projectAgentOverrides?: SkillAgentOverrides;
     droppedStateKeys: string[];
     stateFileUnreadable: boolean;
 }>;

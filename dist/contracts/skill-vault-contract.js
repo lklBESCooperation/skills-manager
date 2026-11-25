@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SkillVaultIndexSchema = exports.SkillVaultEntrySchema = exports.SKILL_VAULT_INDEX_FILE_NAME = exports.SKILL_VAULT_SCHEMA_VERSION = void 0;
+exports.SkillVaultIndexSchema = exports.SkillVaultEntrySchema = exports.ManagedPlacementRecordSchema = exports.ManagedPlacementTopologySchema = exports.SKILL_VAULT_INDEX_FILE_NAME = exports.SKILL_VAULT_SCHEMA_VERSION = void 0;
+exports.classifyCopyModePlacement = classifyCopyModePlacement;
 exports.parseSkillVaultIndex = parseSkillVaultIndex;
 exports.salvageSkillVaultIndex = salvageSkillVaultIndex;
 exports.emptySkillVaultIndex = emptySkillVaultIndex;
@@ -10,6 +11,14 @@ const zod_1 = require("zod");
 exports.SKILL_VAULT_SCHEMA_VERSION = 1;
 exports.SKILL_VAULT_INDEX_FILE_NAME = 'skills-index.json';
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+exports.ManagedPlacementTopologySchema = zod_1.z.enum(['symlink', 'junction', 'copy']);
+exports.ManagedPlacementRecordSchema = zod_1.z
+    .object({
+    topology: exports.ManagedPlacementTopologySchema,
+    syncedDigest: zod_1.z.string().regex(SHA256_PATTERN),
+    syncedMtimeMs: zod_1.z.number().optional()
+})
+    .strict();
 exports.SkillVaultEntrySchema = zod_1.z
     .object({
     /** Stable id: the vault directory name. */
@@ -30,7 +39,9 @@ exports.SkillVaultEntrySchema = zod_1.z
     installedAt: zod_1.z.string().min(1),
     updatedAt: zod_1.z.string().min(1),
     /** True when the host cannot create symlinks and placements are copies. */
-    copyMode: zod_1.z.boolean().optional()
+    copyMode: zod_1.z.boolean().optional(),
+    /** Per-placement sync digests keyed by normalized destination path (Q6 copyMode drift detection). */
+    managedPlacements: zod_1.z.record(zod_1.z.string(), exports.ManagedPlacementRecordSchema).optional()
 })
     .strict();
 exports.SkillVaultIndexSchema = zod_1.z
@@ -39,6 +50,23 @@ exports.SkillVaultIndexSchema = zod_1.z
     entries: zod_1.z.array(exports.SkillVaultEntrySchema)
 })
     .strict();
+/**
+ * Three-way digest comparison (Q6):
+ * - VaultDigest (D_V), SyncedDigest (D_S), ObservedDigest (D_O).
+ */
+function classifyCopyModePlacement(input) {
+    if (!input.placement || input.placement.topology !== 'copy' || input.observedDigest === null) {
+        return 'foreign-conflict';
+    }
+    const { syncedDigest } = input.placement;
+    if (input.observedDigest !== syncedDigest) {
+        return 'managed-copy-drifted';
+    }
+    if (syncedDigest !== input.vaultDigest) {
+        return 'managed-copy-outdated';
+    }
+    return 'managed-copy-clean';
+}
 function parseSkillVaultIndex(value) {
     const parsed = exports.SkillVaultIndexSchema.safeParse(value);
     return parsed.success ? parsed.data : null;
