@@ -154,23 +154,20 @@ describe('scanSkillVault attribution', () => {
   it('records differing mtimes inside a conflict for the user decision', async () => {
     const left = await writeSkill(join(claudeSkills, 'review'), 'review', 'left\n')
     const right = await writeSkill(join(codexSkills, 'review'), 'review', 'right\n')
-    await utimes(
-      join(left, 'SKILL.md'),
-      new Date('2026-11-01T00:00:00Z'),
-      new Date('2026-11-01T00:00:00Z')
-    )
-    await utimes(
-      join(right, 'SKILL.md'),
-      new Date('2026-11-02T00:00:00Z'),
-      new Date('2026-11-02T00:00:00Z')
-    )
+    const sharedDirTime = new Date('2026-11-01T00:00:00Z')
+    const leftSkillTime = new Date('2026-11-01T00:00:00Z')
+    const rightSkillTime = new Date('2026-11-02T00:00:00Z')
+    await utimes(left, sharedDirTime, sharedDirTime)
+    await utimes(right, sharedDirTime, sharedDirTime)
+    await utimes(join(left, 'SKILL.md'), leftSkillTime, leftSkillTime)
+    await utimes(join(right, 'SKILL.md'), rightSkillTime, rightSkillTime)
 
     const plan = await scan([left, right])
 
     const conflict = plan.items[0]
-    expect(conflict?.conflicts.map((variant) => variant.mtimeMs)).not.toEqual([
-      conflict?.conflicts[0]?.mtimeMs,
-      conflict?.conflicts[0]?.mtimeMs
+    expect(conflict?.conflicts.map((variant) => variant.mtimeMs)).toEqual([
+      leftSkillTime.getTime(),
+      rightSkillTime.getTime()
     ])
   })
 })
