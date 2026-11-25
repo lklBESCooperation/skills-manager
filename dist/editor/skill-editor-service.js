@@ -32,6 +32,13 @@ async function resolveSkillRoot(vaultRoot, skillId, readonlyRoots) {
     const realRoot = await (0, promises_1.realpath)(lexicalRoot).catch(() => (0, node_path_1.resolve)(lexicalRoot));
     return { lexicalRoot, realRoot };
 }
+function isRootSkillMarkdownRelative(relPath) {
+    return relPath.replace(/\\/g, '/').toLocaleLowerCase('en-US') === 'skill.md';
+}
+function targetsRootSkillMarkdown(resolved) {
+    return (isRootSkillMarkdownRelative((0, node_path_1.relative)(resolved.lexicalRoot, resolved.target)) ||
+        isRootSkillMarkdownRelative((0, node_path_1.relative)(resolved.realRoot, resolved.realTarget)));
+}
 /**
  * Resolves `relativePath` inside a skill directory and blocks lexical `..`, absolute
  * paths, symlinks escaping the skill directory, and readonly plugin targets.
@@ -59,38 +66,60 @@ async function resolveContainmentPath(input) {
             if (!targetReal || !(0, skill_path_containment_1.skillPathInside)(realRoot, targetReal, semantics)) {
                 throw new Error(`skill-path-escape: symlink ${input.relativePath}`);
             }
+            return {
+                target: candidate,
+                lexicalRoot,
+                realRoot,
+                realTarget: targetReal,
+                exists: true
+            };
         }
-        else {
-            const targetReal = await (0, promises_1.realpath)(candidate);
-            if (!(0, skill_path_containment_1.skillPathInside)(realRoot, targetReal, semantics) && !(0, skill_path_containment_1.skillPathsEqual)(realRoot, targetReal, semantics)) {
-                throw new Error(`skill-path-escape: ${input.relativePath}`);
-            }
+        const targetReal = await (0, promises_1.realpath)(candidate);
+        if (!(0, skill_path_containment_1.skillPathInside)(realRoot, targetReal, semantics) &&
+            !(0, skill_path_containment_1.skillPathsEqual)(realRoot, targetReal, semantics)) {
+            throw new Error(`skill-path-escape: ${input.relativePath}`);
         }
+        return {
+            target: candidate,
+            lexicalRoot,
+            realRoot,
+            realTarget: targetReal,
+            exists: true
+        };
     }
-    else {
-        if (!input.allowMissingTarget) {
-            throw new Error(`skill-editor-not-found: ${input.relativePath}`);
-        }
-        let cursor = (0, node_path_1.dirname)(candidate);
-        while (!(0, skill_path_containment_1.skillPathsEqual)(cursor, lexicalRoot, semantics)) {
-            const ancestorStat = await (0, promises_1.lstat)(cursor).catch(() => null);
-            if (ancestorStat) {
-                const ancestorReal = await (0, promises_1.realpath)(cursor).catch(() => null);
-                if (!ancestorReal ||
-                    (!(0, skill_path_containment_1.skillPathInside)(realRoot, ancestorReal, semantics) &&
-                        !(0, skill_path_containment_1.skillPathsEqual)(realRoot, ancestorReal, semantics))) {
-                    throw new Error(`skill-path-escape: ancestor symlink ${input.relativePath}`);
-                }
-                break;
+    let resolvedAncestorReal = realRoot;
+    let resolvedAncestorLexical = lexicalRoot;
+    let cursor = (0, node_path_1.dirname)(candidate);
+    while (!(0, skill_path_containment_1.skillPathsEqual)(cursor, lexicalRoot, semantics)) {
+        const ancestorStat = await (0, promises_1.lstat)(cursor).catch(() => null);
+        if (ancestorStat) {
+            const ancestorReal = await (0, promises_1.realpath)(cursor).catch(() => null);
+            if (!ancestorReal ||
+                (!(0, skill_path_containment_1.skillPathInside)(realRoot, ancestorReal, semantics) &&
+                    !(0, skill_path_containment_1.skillPathsEqual)(realRoot, ancestorReal, semantics))) {
+                throw new Error(`skill-path-escape: ancestor symlink ${input.relativePath}`);
             }
-            const nextParent = (0, node_path_1.dirname)(cursor);
-            if (nextParent === cursor) {
-                throw new Error(`skill-path-escape: ${input.relativePath}`);
-            }
-            cursor = nextParent;
+            resolvedAncestorReal = ancestorReal;
+            resolvedAncestorLexical = cursor;
+            break;
         }
+        const nextParent = (0, node_path_1.dirname)(cursor);
+        if (nextParent === cursor) {
+            throw new Error(`skill-path-escape: ${input.relativePath}`);
+        }
+        cursor = nextParent;
     }
-    return candidate;
+    if (!input.allowMissingTarget) {
+        throw new Error(`skill-editor-not-found: ${input.relativePath}`);
+    }
+    const realTarget = (0, node_path_1.join)(resolvedAncestorReal, (0, node_path_1.relative)(resolvedAncestorLexical, candidate));
+    return {
+        target: candidate,
+        lexicalRoot,
+        realRoot,
+        realTarget,
+        exists: false
+    };
 }
 async function syncVaultEntryAfterEdit(scope, skillId) {
     const index = await (0, skill_vault_index_service_1.readSkillVaultIndex)(scope.indexPath);
@@ -172,56 +201,59 @@ async function listSkillFiles(scope, skillId) {
     return entries;
 }
 async function readSkillFile(scope, skillId, relativePath) {
-    const target = await resolveContainmentPath({
+    const resolved = await resolveContainmentPath({
         vaultRoot: scope.vaultRoot,
         skillId,
         relativePath,
         readonlyRoots: scope.readonlyRoots,
         allowMissingTarget: false
     });
-    return (0, promises_1.readFile)(target, 'utf8');
+    return (0, promises_1.readFile)(resolved.target, 'utf8');
 }
 async function writeSkillFile(scope, skillId, relativePath, content, options) {
-    const normalizedRel = relativePath.replace(/\\/g, '/');
-    if (normalizedRel === 'SKILL.md' && options?.validateFrontmatter !== false) {
-        const validation = (0, skill_editor_contract_1.validateSkillFrontmatter)(content);
-        if (!validation.valid) {
-            throw new Error(`skill-editor-invalid-frontmatter: ${validation.errors.join('; ')}`);
-        }
-    }
-    const target = await resolveContainmentPath({
+    const resolved = await resolveContainmentPath({
         vaultRoot: scope.vaultRoot,
         skillId,
         relativePath,
         readonlyRoots: scope.readonlyRoots,
         allowMissingTarget: true
     });
-    await (0, promises_1.mkdir)((0, node_path_1.dirname)(target), { recursive: true });
-    const temp = `${target}.${(0, node_crypto_1.randomUUID)()}.tmp`;
+    const isSkillMarkdown = targetsRootSkillMarkdown(resolved);
+    if (isSkillMarkdown && options?.validateFrontmatter !== false) {
+        const validation = (0, skill_editor_contract_1.validateSkillFrontmatter)(content);
+        if (!validation.valid) {
+            throw new Error(`skill-editor-invalid-frontmatter: ${validation.errors.join('; ')}`);
+        }
+    }
+    const writeTarget = isSkillMarkdown ? (0, node_path_1.join)(resolved.lexicalRoot, 'SKILL.md') : resolved.target;
+    await (0, promises_1.mkdir)((0, node_path_1.dirname)(writeTarget), { recursive: true });
+    const temp = `${writeTarget}.${(0, node_crypto_1.randomUUID)()}.tmp`;
     await (0, promises_1.writeFile)(temp, content, 'utf8');
     try {
-        await (0, skill_filesystem_retry_1.renameSkillPathWithWindowsRetry)(temp, target);
+        await (0, skill_filesystem_retry_1.renameSkillPathWithWindowsRetry)(temp, writeTarget);
     }
     finally {
         await (0, promises_1.rm)(temp, { force: true }).catch(() => undefined);
     }
     await syncVaultEntryAfterEdit(scope, skillId);
     const digest = await (0, skill_vault_index_service_1.computeSkillVaultDigest)((0, skill_vault_paths_1.skillVaultEntryRoot)(scope.vaultRoot, skillId));
-    return { path: target, digest };
+    return { path: writeTarget, digest };
 }
 async function deleteSkillFile(scope, skillId, relativePath) {
-    const normalizedRel = relativePath.replace(/\\/g, '/');
-    if (normalizedRel === 'SKILL.md') {
-        throw new Error('skill-editor-cannot-delete-skill-md');
-    }
-    const target = await resolveContainmentPath({
+    const resolved = await resolveContainmentPath({
         vaultRoot: scope.vaultRoot,
         skillId,
         relativePath,
         readonlyRoots: scope.readonlyRoots,
-        allowMissingTarget: false
+        allowMissingTarget: true
     });
-    await (0, promises_1.rm)(target, { recursive: true, force: true });
+    if (targetsRootSkillMarkdown(resolved)) {
+        throw new Error('skill-editor-cannot-delete-skill-md');
+    }
+    if (!resolved.exists) {
+        throw new Error(`skill-editor-not-found: ${relativePath}`);
+    }
+    await (0, promises_1.rm)(resolved.target, { recursive: true, force: true });
     await syncVaultEntryAfterEdit(scope, skillId);
 }
 async function createLocalSkillInVault(scope, input, extraFiles) {
@@ -257,8 +289,16 @@ async function createLocalSkillInVault(scope, input, extraFiles) {
                 if (!(0, skill_path_containment_1.skillPathInside)(stagePath, full, semantics)) {
                     throw new Error(`skill-path-escape: ${extra.relativePath}`);
                 }
-                await (0, promises_1.mkdir)((0, node_path_1.dirname)(full), { recursive: true });
-                await (0, promises_1.writeFile)(full, extra.content, 'utf8');
+                const isExtraSkillMd = isRootSkillMarkdownRelative((0, node_path_1.relative)(stagePath, full));
+                if (isExtraSkillMd) {
+                    const extraValidation = (0, skill_editor_contract_1.validateSkillFrontmatter)(extra.content);
+                    if (!extraValidation.valid) {
+                        throw new Error(`skill-editor-invalid-frontmatter: ${extraValidation.errors.join('; ')}`);
+                    }
+                }
+                const writeTarget = isExtraSkillMd ? (0, node_path_1.join)(stagePath, 'SKILL.md') : full;
+                await (0, promises_1.mkdir)((0, node_path_1.dirname)(writeTarget), { recursive: true });
+                await (0, promises_1.writeFile)(writeTarget, extra.content, 'utf8');
             }
         }
         await (0, skill_filesystem_retry_1.renameSkillPathWithWindowsRetry)(stagePath, vaultPath);

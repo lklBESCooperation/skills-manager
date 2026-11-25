@@ -55,6 +55,25 @@ async function resolveSkillRoot(
   return { lexicalRoot, realRoot }
 }
 
+type ResolvedEditorTarget = {
+  target: string
+  lexicalRoot: string
+  realRoot: string
+  realTarget: string
+  exists: boolean
+}
+
+function isRootSkillMarkdownRelative(relPath: string): boolean {
+  return relPath.replace(/\\/g, '/').toLocaleLowerCase('en-US') === 'skill.md'
+}
+
+function targetsRootSkillMarkdown(resolved: ResolvedEditorTarget): boolean {
+  return (
+    isRootSkillMarkdownRelative(relative(resolved.lexicalRoot, resolved.target)) ||
+    isRootSkillMarkdownRelative(relative(resolved.realRoot, resolved.realTarget))
+  )
+}
+
 /**
  * Resolves `relativePath` inside a skill directory and blocks lexical `..`, absolute
  * paths, symlinks escaping the skill directory, and readonly plugin targets.
@@ -65,7 +84,7 @@ async function resolveContainmentPath(input: {
   relativePath: string
   readonlyRoots?: readonly string[]
   allowMissingTarget?: boolean
-}): Promise<string> {
+}): Promise<ResolvedEditorTarget> {
   const { lexicalRoot, realRoot } = await resolveSkillRoot(
     input.vaultRoot,
     input.skillId,
@@ -96,39 +115,67 @@ async function resolveContainmentPath(input: {
       if (!targetReal || !skillPathInside(realRoot, targetReal, semantics)) {
         throw new Error(`skill-path-escape: symlink ${input.relativePath}`)
       }
-    } else {
-      const targetReal = await realpath(candidate)
-      if (!skillPathInside(realRoot, targetReal, semantics) && !skillPathsEqual(realRoot, targetReal, semantics)) {
-        throw new Error(`skill-path-escape: ${input.relativePath}`)
+      return {
+        target: candidate,
+        lexicalRoot,
+        realRoot,
+        realTarget: targetReal,
+        exists: true
       }
     }
-  } else {
-    if (!input.allowMissingTarget) {
-      throw new Error(`skill-editor-not-found: ${input.relativePath}`)
+    const targetReal = await realpath(candidate)
+    if (
+      !skillPathInside(realRoot, targetReal, semantics) &&
+      !skillPathsEqual(realRoot, targetReal, semantics)
+    ) {
+      throw new Error(`skill-path-escape: ${input.relativePath}`)
     }
-    let cursor = dirname(candidate)
-    while (!skillPathsEqual(cursor, lexicalRoot, semantics)) {
-      const ancestorStat = await lstat(cursor).catch(() => null)
-      if (ancestorStat) {
-        const ancestorReal = await realpath(cursor).catch(() => null)
-        if (
-          !ancestorReal ||
-          (!skillPathInside(realRoot, ancestorReal, semantics) &&
-            !skillPathsEqual(realRoot, ancestorReal, semantics))
-        ) {
-          throw new Error(`skill-path-escape: ancestor symlink ${input.relativePath}`)
-        }
-        break
-      }
-      const nextParent = dirname(cursor)
-      if (nextParent === cursor) {
-        throw new Error(`skill-path-escape: ${input.relativePath}`)
-      }
-      cursor = nextParent
+    return {
+      target: candidate,
+      lexicalRoot,
+      realRoot,
+      realTarget: targetReal,
+      exists: true
     }
   }
 
-  return candidate
+  let resolvedAncestorReal = realRoot
+  let resolvedAncestorLexical = lexicalRoot
+  let cursor = dirname(candidate)
+  while (!skillPathsEqual(cursor, lexicalRoot, semantics)) {
+    const ancestorStat = await lstat(cursor).catch(() => null)
+    if (ancestorStat) {
+      const ancestorReal = await realpath(cursor).catch(() => null)
+      if (
+        !ancestorReal ||
+        (!skillPathInside(realRoot, ancestorReal, semantics) &&
+          !skillPathsEqual(realRoot, ancestorReal, semantics))
+      ) {
+        throw new Error(`skill-path-escape: ancestor symlink ${input.relativePath}`)
+      }
+      resolvedAncestorReal = ancestorReal
+      resolvedAncestorLexical = cursor
+      break
+    }
+    const nextParent = dirname(cursor)
+    if (nextParent === cursor) {
+      throw new Error(`skill-path-escape: ${input.relativePath}`)
+    }
+    cursor = nextParent
+  }
+
+  if (!input.allowMissingTarget) {
+    throw new Error(`skill-editor-not-found: ${input.relativePath}`)
+  }
+
+  const realTarget = join(resolvedAncestorReal, relative(resolvedAncestorLexical, candidate))
+  return {
+    target: candidate,
+    lexicalRoot,
+    realRoot,
+    realTarget,
+    exists: false
+  }
 }
 
 async function syncVaultEntryAfterEdit(
@@ -228,14 +275,14 @@ export async function readSkillFile(
   skillId: string,
   relativePath: string
 ): Promise<string> {
-  const target = await resolveContainmentPath({
+  const resolved = await resolveContainmentPath({
     vaultRoot: scope.vaultRoot,
     skillId,
     relativePath,
     readonlyRoots: scope.readonlyRoots,
     allowMissingTarget: false
   })
-  return readFile(target, 'utf8')
+  return readFile(resolved.target, 'utf8')
 }
 
 export async function writeSkillFile(
@@ -245,31 +292,32 @@ export async function writeSkillFile(
   content: string,
   options?: { validateFrontmatter?: boolean }
 ): Promise<{ path: string; digest: string }> {
-  const normalizedRel = relativePath.replace(/\\/g, '/')
-  if (normalizedRel === 'SKILL.md' && options?.validateFrontmatter !== false) {
-    const validation = validateSkillFrontmatter(content)
-    if (!validation.valid) {
-      throw new Error(`skill-editor-invalid-frontmatter: ${validation.errors.join('; ')}`)
-    }
-  }
-  const target = await resolveContainmentPath({
+  const resolved = await resolveContainmentPath({
     vaultRoot: scope.vaultRoot,
     skillId,
     relativePath,
     readonlyRoots: scope.readonlyRoots,
     allowMissingTarget: true
   })
-  await mkdir(dirname(target), { recursive: true })
-  const temp = `${target}.${randomUUID()}.tmp`
+  const isSkillMarkdown = targetsRootSkillMarkdown(resolved)
+  if (isSkillMarkdown && options?.validateFrontmatter !== false) {
+    const validation = validateSkillFrontmatter(content)
+    if (!validation.valid) {
+      throw new Error(`skill-editor-invalid-frontmatter: ${validation.errors.join('; ')}`)
+    }
+  }
+  const writeTarget = isSkillMarkdown ? join(resolved.lexicalRoot, 'SKILL.md') : resolved.target
+  await mkdir(dirname(writeTarget), { recursive: true })
+  const temp = `${writeTarget}.${randomUUID()}.tmp`
   await writeFile(temp, content, 'utf8')
   try {
-    await renameSkillPathWithWindowsRetry(temp, target)
+    await renameSkillPathWithWindowsRetry(temp, writeTarget)
   } finally {
     await rm(temp, { force: true }).catch(() => undefined)
   }
   await syncVaultEntryAfterEdit(scope, skillId)
   const digest = await computeSkillVaultDigest(skillVaultEntryRoot(scope.vaultRoot, skillId))
-  return { path: target, digest }
+  return { path: writeTarget, digest }
 }
 
 export async function deleteSkillFile(
@@ -277,18 +325,20 @@ export async function deleteSkillFile(
   skillId: string,
   relativePath: string
 ): Promise<void> {
-  const normalizedRel = relativePath.replace(/\\/g, '/')
-  if (normalizedRel === 'SKILL.md') {
-    throw new Error('skill-editor-cannot-delete-skill-md')
-  }
-  const target = await resolveContainmentPath({
+  const resolved = await resolveContainmentPath({
     vaultRoot: scope.vaultRoot,
     skillId,
     relativePath,
     readonlyRoots: scope.readonlyRoots,
-    allowMissingTarget: false
+    allowMissingTarget: true
   })
-  await rm(target, { recursive: true, force: true })
+  if (targetsRootSkillMarkdown(resolved)) {
+    throw new Error('skill-editor-cannot-delete-skill-md')
+  }
+  if (!resolved.exists) {
+    throw new Error(`skill-editor-not-found: ${relativePath}`)
+  }
+  await rm(resolved.target, { recursive: true, force: true })
   await syncVaultEntryAfterEdit(scope, skillId)
 }
 
@@ -334,8 +384,18 @@ export async function createLocalSkillInVault(
         if (!skillPathInside(stagePath, full, semantics)) {
           throw new Error(`skill-path-escape: ${extra.relativePath}`)
         }
-        await mkdir(dirname(full), { recursive: true })
-        await writeFile(full, extra.content, 'utf8')
+        const isExtraSkillMd = isRootSkillMarkdownRelative(relative(stagePath, full))
+        if (isExtraSkillMd) {
+          const extraValidation = validateSkillFrontmatter(extra.content)
+          if (!extraValidation.valid) {
+            throw new Error(
+              `skill-editor-invalid-frontmatter: ${extraValidation.errors.join('; ')}`
+            )
+          }
+        }
+        const writeTarget = isExtraSkillMd ? join(stagePath, 'SKILL.md') : full
+        await mkdir(dirname(writeTarget), { recursive: true })
+        await writeFile(writeTarget, extra.content, 'utf8')
       }
     }
     await renameSkillPathWithWindowsRetry(stagePath, vaultPath)
