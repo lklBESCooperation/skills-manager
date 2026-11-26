@@ -3,7 +3,7 @@
   "manifestVersion": 2,
   "id": "skills-manager",
   "name": "Skills Manager",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Unified Skills Vault, Packs, Marketplace & Read-Only Plugin Skills workbench across all PMStudio agents.",
   "execution": "sandboxed-ui",
   "engines": {
