@@ -145,7 +145,7 @@ describe('Pack v2, dynamic SkillPackService apply, undo ring, export/import & ma
     }
     expect(manifest.manifestVersion).toBe(2)
     expect(manifest.id).toBe('skills-manager')
-    expect(manifest.version).toBe('0.2.0')
+    expect(manifest.version).toBe('0.2.1')
     expect(manifest.execution).toBe('sandboxed-ui')
     expect(manifest.contributes.pages).toHaveLength(1)
     expect(manifest.contributes.pages[0]?.layout).toBe('full-page')
