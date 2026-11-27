@@ -3,13 +3,14 @@
   "manifestVersion": 2,
   "id": "skills-manager",
   "name": "Skills Manager",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Unified Skills Vault, Packs, Marketplace & Read-Only Plugin Skills workbench across all PMStudio agents.",
   "cover": {
     "path": "images/cover.png",
     "alt": "Skills Manager 技能工作台：已安装技能列表、在线市场与技能包审计"
   },
-  "execution": "sandboxed-ui",
+  "execution": "trusted-worker",
+  "main": "dist/plugin-worker.mjs",
   "engines": {
     "orca": ">=1.4.274"
   },
@@ -20,6 +21,9 @@
     { "kind": "storage:own" }
   ],
   "contributes": {
+    "events": [
+      { "on": "workspace.changed" }
+    ],
     "pages": [
       {
         "id": "skills-workbench",

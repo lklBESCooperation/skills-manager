@@ -12,5 +12,10 @@
     "noEmitOnError": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts", "src/**/*.test-fixture.ts"]
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.test-fixture.ts",
+    "src/ui/**/*.ts",
+    "src/worker/**/*.ts"
+  ]
 }

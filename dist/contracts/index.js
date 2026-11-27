@@ -28,3 +28,4 @@ __exportStar(require("./skill-path-containment"), exports);
 __exportStar(require("./skill-catalog-contract"), exports);
 __exportStar(require("./skill-editor-contract"), exports);
 __exportStar(require("./skill-audit-contract"), exports);
+__exportStar(require("./skill-ui-bridge-contract"), exports);
