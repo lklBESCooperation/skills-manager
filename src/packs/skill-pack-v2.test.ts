@@ -139,6 +139,7 @@ describe('Pack v2, dynamic SkillPackService apply, undo ring, export/import & ma
       version: string
       execution: string
       engines?: { orca?: string }
+      cover?: { path: string; alt: string }
       contributes: {
         pages: { id: string; entry: string; layout?: string; sidebar?: { placement?: string } }[]
         panels: { id: string; entry: string }[]
@@ -146,14 +147,16 @@ describe('Pack v2, dynamic SkillPackService apply, undo ring, export/import & ma
     }
     expect(manifest.manifestVersion).toBe(2)
     expect(manifest.id).toBe('skills-manager')
-    expect(manifest.version).toBe('0.2.2')
+    expect(manifest.version).toBe('0.2.3')
     expect(manifest.execution).toBe('sandboxed-ui')
     expect(manifest.engines?.orca).toBe('>=1.4.274')
+    expect(manifest.cover?.alt.length).toBeGreaterThan(0)
     expect(manifest.contributes.pages).toHaveLength(1)
     expect(manifest.contributes.pages[0]?.layout).toBe('full-page')
     expect(manifest.contributes.pages[0]?.sidebar?.placement).toBe('primary')
     expect(manifest.contributes.panels).toHaveLength(1)
 
+    await access(join(repoRoot, manifest.cover!.path))
     await access(join(repoRoot, manifest.contributes.pages[0]!.entry))
     await access(join(repoRoot, manifest.contributes.panels[0]!.entry))
   })

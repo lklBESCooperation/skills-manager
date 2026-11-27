@@ -1,10 +1,11 @@
 {
   "name": "@pmstudio/skills-manager",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "files": [
     "dist",
     "orca-plugin.json",
-    "ui"
+    "ui",
+    "images/cover.png"
   ],
   "type": "commonjs",
   "main": "./dist/index.js",
