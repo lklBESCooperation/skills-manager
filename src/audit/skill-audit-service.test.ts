@@ -78,5 +78,41 @@ describe('auditSkillsHealth (read-only diagnostics)', () => {
     expect(report.summary.pluginCollisions).toBe(1)
     expect(report.summary.pluginSkillsTotal).toBe(1)
     expect(report.summary.pluginSkillsActive).toBe(1)
+    expect(report).toStrictEqual(JSON.parse(JSON.stringify(report)))
+  })
+
+  it('omits undefined agent property for .agents/skills findings so IPC JSON serialization passes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'orca-audit-json-'))
+    roots.push(root)
+    const home = join(root, 'home')
+    const vaultRoot = join(home, '.pmstudio', 'skills')
+    await mkdir(vaultRoot, { recursive: true })
+    await mkdir(join(home, '.agents', 'skills', 'rex'), { recursive: true })
+    await mkdir(join(home, '.claude', 'skills', 'rex'), { recursive: true })
+    await writeFile(join(home, '.agents', 'skills', 'rex', 'SKILL.md'), '---\nname: rex\n---\nsame\n')
+    await writeFile(join(home, '.claude', 'skills', 'rex', 'SKILL.md'), '---\nname: rex\n---\nsame\n')
+
+    await mkdir(join(home, '.agents', 'skills', 'clash-canon'), { recursive: true })
+    await mkdir(join(home, '.claude', 'skills', 'clash-canon'), { recursive: true })
+    await writeFile(join(home, '.agents', 'skills', 'clash-canon', 'SKILL.md'), '---\nname: clash\n---\nA\n')
+    await writeFile(join(home, '.claude', 'skills', 'clash-canon', 'SKILL.md'), '---\nname: clash\n---\nB\n')
+
+    const report = await auditSkillsHealth({
+      scope: 'global',
+      homeDirectory: home,
+      vaultRoot
+    })
+
+    const dupFinding = report.findings.find(
+      (f) => f.kind === 'duplicate-same-digest' && f.skillId === 'rex'
+    )
+    const conflictFinding = report.findings.find(
+      (f) => f.kind === 'digest-conflict' && f.skillId === 'clash-canon'
+    )
+    expect(dupFinding).toBeDefined()
+    expect(conflictFinding).toBeDefined()
+    expect('agent' in dupFinding!).toBe(false)
+    expect('agent' in conflictFinding!).toBe(false)
+    expect(report).toStrictEqual(JSON.parse(JSON.stringify(report)))
   })
 })

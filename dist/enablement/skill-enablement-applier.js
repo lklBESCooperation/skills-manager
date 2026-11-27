@@ -98,7 +98,9 @@ async function runSkillEnablementCommand(input) {
     if (!scopeRoot) {
         throw new Error('skill-enablement-workspace-required');
     }
-    const canonicalRoot = (0, node_path_1.join)(scopeRoot, '.agents', 'skills');
+    const canonicalRoot = runtime.canonicalRoot === null
+        ? undefined
+        : (runtime.canonicalRoot ?? (0, node_path_1.join)(scopeRoot, '.agents', 'skills'));
     const replayed = await (0, skill_enablement_journal_1.recoverEnablementJournal)(runtime.stateDirectory, runtime.fileIO.readFileBounded, runtime.readonlyRoots);
     const userDefaultsPath = userDefaultsStatePath(runtime.homeDirectory);
     const projectStateFile = runtime.workspaceDirectory === undefined ? null : projectStatePath(runtime.workspaceDirectory);
@@ -107,7 +109,7 @@ async function runSkillEnablementCommand(input) {
         projectStateFile === null
             ? Promise.resolve((0, skill_enablement_1.parseSkillProjectStateFile)(null, runtime.fileIO.salvage))
             : readOptionalFile(projectStateFile).then((raw) => (0, skill_enablement_1.parseSkillProjectStateFile)(raw, runtime.fileIO.salvage)),
-        (0, installed_skill_inventory_1.listInstalledSkillIds)(runtime.vaultRoot, canonicalRoot),
+        (0, installed_skill_inventory_1.listInstalledSkillIds)(runtime.vaultRoot, canonicalRoot ?? runtime.vaultRoot),
         runtime.indexPath ? (0, skill_vault_index_service_1.readSkillVaultIndex)(runtime.indexPath) : Promise.resolve(null)
     ]);
     const unknown = input.command.skillIds.filter((id) => !installedSkillIds.includes(id));
@@ -191,7 +193,7 @@ async function runSkillEnablementCommand(input) {
         stateDirectory: runtime.stateDirectory,
         plan,
         vaultRoot: runtime.vaultRoot,
-        canonicalRoot,
+        canonicalRoot: canonicalRoot ?? runtime.vaultRoot,
         readonlyRoots: runtime.readonlyRoots,
         interruptAfterCount: input.interruptAfterCount
     });

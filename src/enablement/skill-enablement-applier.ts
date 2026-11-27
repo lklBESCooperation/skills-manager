@@ -78,6 +78,8 @@ export type SkillEnablementRuntimeInput = {
   providerRootOverrides?: SkillProviderRootOverrides
   readonlyRoots?: readonly string[]
   copyMode?: boolean
+  /** Optional override for canonical root lookup; `null` restricts inventory to `vaultRoot` only. */
+  canonicalRoot?: string | null
   /** Host-injected file IO; the CLI entry binds the app's shared implementations. */
   fileIO: SkillEnablementFileIO
 }
@@ -200,7 +202,10 @@ export async function runSkillEnablementCommand(input: {
   if (!scopeRoot) {
     throw new Error('skill-enablement-workspace-required')
   }
-  const canonicalRoot = join(scopeRoot, '.agents', 'skills')
+  const canonicalRoot =
+    runtime.canonicalRoot === null
+      ? undefined
+      : (runtime.canonicalRoot ?? join(scopeRoot, '.agents', 'skills'))
   const replayed = await recoverEnablementJournal(
     runtime.stateDirectory,
     runtime.fileIO.readFileBounded,
@@ -220,7 +225,7 @@ export async function runSkillEnablementCommand(input: {
         : readOptionalFile(projectStateFile).then((raw) =>
             parseSkillProjectStateFile(raw, runtime.fileIO.salvage)
           ),
-      listInstalledSkillIds(runtime.vaultRoot, canonicalRoot),
+      listInstalledSkillIds(runtime.vaultRoot, canonicalRoot ?? runtime.vaultRoot),
       runtime.indexPath ? readSkillVaultIndex(runtime.indexPath) : Promise.resolve(null)
     ])
   const unknown = input.command.skillIds.filter((id) => !installedSkillIds.includes(id))
@@ -318,7 +323,7 @@ export async function runSkillEnablementCommand(input: {
     stateDirectory: runtime.stateDirectory,
     plan,
     vaultRoot: runtime.vaultRoot,
-    canonicalRoot,
+    canonicalRoot: canonicalRoot ?? runtime.vaultRoot,
     readonlyRoots: runtime.readonlyRoots,
     interruptAfterCount: input.interruptAfterCount
   })

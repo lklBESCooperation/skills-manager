@@ -20165,14 +20165,72 @@ function rollbackOptimisticMutation(skills, rollbackSnapshot) {
   }
   return skills.map((item) => rollbackSnapshot.get(item.rowKey) ?? item);
 }
-function reconcileQuickPanelSkills(skills, updatedSkills) {
-  if (updatedSkills.length === 0) {
-    return [...skills];
-  }
-  const updatedByKey = new Map(
-    updatedSkills.map(({ agents: _a3, agentDetails: _d, ...rest }) => [rest.rowKey, rest])
+function reconcileQuickPanelSkills(skills, updatedSkills, rollbackSnapshot, failedSkillIds) {
+  return reconcileMutationResult(
+    skills,
+    updatedSkills,
+    rollbackSnapshot,
+    failedSkillIds,
+    ({ agents: _a3, agentDetails: _d, ...rest }) => rest
   );
-  return skills.map((item) => updatedByKey.get(item.rowKey) ?? item);
+}
+function reconcileMutationResult(skills, updatedSkills, rollbackSnapshot, failedSkillIds, toItem) {
+  const updatedByKey = new Map(
+    updatedSkills.map((skill) => {
+      const mapped = toItem(skill);
+      return [mapped.rowKey, mapped];
+    })
+  );
+  return skills.map((item) => {
+    const serverItem = updatedByKey.get(item.rowKey);
+    if (serverItem) {
+      return serverItem;
+    }
+    if (failedSkillIds?.has(item.id) && rollbackSnapshot?.has(item.rowKey)) {
+      return rollbackSnapshot.get(item.rowKey);
+    }
+    return item;
+  });
+}
+function summarizeMutationFeedback(results, targetLabel) {
+  const conflicts = [];
+  const readonlyBlocked = [];
+  const failed = [];
+  for (const res of results) {
+    for (const c of res.conflicts) {
+      conflicts.push(`${c.skillId} (${c.provider}: ${c.rootPath})`);
+    }
+    for (const r of res.readonlyBlocked) {
+      readonlyBlocked.push(`${r.skillId} (${r.provider})`);
+    }
+    for (const f of res.failed) {
+      failed.push(`${f.skillId}: ${f.error}`);
+    }
+  }
+  const issueParts = [];
+  if (failed.length > 0) {
+    issueParts.push(`\u64CD\u4F5C\u5931\u8D25\uFF1A${failed.join("\uFF1B")}`);
+  }
+  if (conflicts.length > 0) {
+    issueParts.push(`\u5B58\u5728\u672A\u7EB3\u7BA1\u540C\u540D\u76EE\u5F55\u51B2\u7A81\uFF0C\u672A\u8986\u76D6\u539F\u6709\u76EE\u5F55\uFF1A${conflicts.join("\uFF1B")}`);
+  }
+  if (readonlyBlocked.length > 0) {
+    issueParts.push(`\u53EA\u8BFB\u63D2\u4EF6\u8DEF\u5F84\u5DF2\u62E6\u622A\u4FDD\u62A4\uFF1A${readonlyBlocked.join("\uFF1B")}`);
+  }
+  if (failed.length > 0) {
+    const prefix = targetLabel ? `\u5207\u6362 ${targetLabel} \u72B6\u6001\u5931\u8D25\uFF0C\u5DF2\u56DE\u6EDA\u81F3\u539F\u72B6\u6001\uFF1A` : "";
+    return {
+      kind: "error",
+      message: `${prefix}${issueParts.join(" | ")}`
+    };
+  }
+  if (issueParts.length > 0) {
+    return {
+      kind: "warn",
+      message: issueParts.join(" | ")
+    };
+  }
+  return { kind: "success" };
 }
 
 // src/ui/skills-panel.ts
@@ -20253,10 +20311,28 @@ function mountSkillsPanel() {
         writeScope,
         skillScope: item.scope
       });
+      const failedSkillIds = new Set(res.failed.map((f) => f.skillId));
       if (state.snapshot) {
         state.snapshot = {
           ...state.snapshot,
-          managedSkills: reconcileQuickPanelSkills(state.snapshot.managedSkills, res.updatedSkills)
+          managedSkills: reconcileQuickPanelSkills(
+            state.snapshot.managedSkills,
+            res.updatedSkills,
+            rollbackSnapshot,
+            failedSkillIds
+          )
+        };
+      }
+      const feedback = summarizeMutationFeedback([res], `\u300C${item.name}\u300D`);
+      if (feedback.kind === "error") {
+        state.actionError = {
+          message: feedback.message,
+          retry: () => void toggleSkill(item)
+        };
+      } else if (feedback.kind === "warn") {
+        state.actionError = {
+          message: feedback.message,
+          retry: null
         };
       }
     } catch (error62) {

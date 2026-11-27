@@ -35,6 +35,8 @@ export type SkillEnablementRuntimeInput = {
     providerRootOverrides?: SkillProviderRootOverrides;
     readonlyRoots?: readonly string[];
     copyMode?: boolean;
+    /** Optional override for canonical root lookup; `null` restricts inventory to `vaultRoot` only. */
+    canonicalRoot?: string | null;
     /** Host-injected file IO; the CLI entry binds the app's shared implementations. */
     fileIO: SkillEnablementFileIO;
 };

@@ -20230,12 +20230,72 @@ function rollbackOptimisticMutation(skills, rollbackSnapshot) {
   }
   return skills.map((item) => rollbackSnapshot.get(item.rowKey) ?? item);
 }
-function reconcileMutatedSkills(skills, updatedSkills) {
-  if (updatedSkills.length === 0) {
-    return [...skills];
+function reconcileMutatedSkills(skills, updatedSkills, rollbackSnapshot, failedSkillIds) {
+  return reconcileMutationResult(
+    skills,
+    updatedSkills,
+    rollbackSnapshot,
+    failedSkillIds,
+    (item) => item
+  );
+}
+function reconcileMutationResult(skills, updatedSkills, rollbackSnapshot, failedSkillIds, toItem) {
+  const updatedByKey = new Map(
+    updatedSkills.map((skill) => {
+      const mapped = toItem(skill);
+      return [mapped.rowKey, mapped];
+    })
+  );
+  return skills.map((item) => {
+    const serverItem = updatedByKey.get(item.rowKey);
+    if (serverItem) {
+      return serverItem;
+    }
+    if (failedSkillIds?.has(item.id) && rollbackSnapshot?.has(item.rowKey)) {
+      return rollbackSnapshot.get(item.rowKey);
+    }
+    return item;
+  });
+}
+function summarizeMutationFeedback(results, targetLabel) {
+  const conflicts = [];
+  const readonlyBlocked = [];
+  const failed = [];
+  for (const res of results) {
+    for (const c of res.conflicts) {
+      conflicts.push(`${c.skillId} (${c.provider}: ${c.rootPath})`);
+    }
+    for (const r of res.readonlyBlocked) {
+      readonlyBlocked.push(`${r.skillId} (${r.provider})`);
+    }
+    for (const f of res.failed) {
+      failed.push(`${f.skillId}: ${f.error}`);
+    }
   }
-  const updatedByKey = new Map(updatedSkills.map((item) => [item.rowKey, item]));
-  return skills.map((item) => updatedByKey.get(item.rowKey) ?? item);
+  const issueParts = [];
+  if (failed.length > 0) {
+    issueParts.push(`\u64CD\u4F5C\u5931\u8D25\uFF1A${failed.join("\uFF1B")}`);
+  }
+  if (conflicts.length > 0) {
+    issueParts.push(`\u5B58\u5728\u672A\u7EB3\u7BA1\u540C\u540D\u76EE\u5F55\u51B2\u7A81\uFF0C\u672A\u8986\u76D6\u539F\u6709\u76EE\u5F55\uFF1A${conflicts.join("\uFF1B")}`);
+  }
+  if (readonlyBlocked.length > 0) {
+    issueParts.push(`\u53EA\u8BFB\u63D2\u4EF6\u8DEF\u5F84\u5DF2\u62E6\u622A\u4FDD\u62A4\uFF1A${readonlyBlocked.join("\uFF1B")}`);
+  }
+  if (failed.length > 0) {
+    const prefix = targetLabel ? `\u5207\u6362 ${targetLabel} \u72B6\u6001\u5931\u8D25\uFF0C\u5DF2\u56DE\u6EDA\u81F3\u539F\u72B6\u6001\uFF1A` : "";
+    return {
+      kind: "error",
+      message: `${prefix}${issueParts.join(" | ")}`
+    };
+  }
+  if (issueParts.length > 0) {
+    return {
+      kind: "warn",
+      message: issueParts.join(" | ")
+    };
+  }
+  return { kind: "success" };
 }
 function formatSourceKindLabel(kind) {
   switch (kind) {
@@ -21667,8 +21727,7 @@ function mountSkillsWorkbench() {
     }
     try {
       let updatedAll = [];
-      const conflicts = [];
-      const readonlyBlocked = [];
+      const results = [];
       for (const [skillScope, items] of byScope.entries()) {
         const res = await bridgeClient.mutateEnablement({
           kind: input2.kind,
@@ -21677,29 +21736,31 @@ function mountSkillsWorkbench() {
           skillScope,
           ...input2.agents ? { agents: input2.agents } : {}
         });
+        results.push(res);
         updatedAll = [...updatedAll, ...res.updatedSkills];
-        for (const c of res.conflicts) {
-          conflicts.push(`${c.skillId} (${c.provider}: ${c.rootPath})`);
-        }
-        for (const r of res.readonlyBlocked) {
-          readonlyBlocked.push(`${r.skillId} (${r.provider})`);
-        }
       }
+      const failedSkillIds = new Set(results.flatMap((r) => r.failed.map((f) => f.skillId)));
       if (snapshot) {
         snapshot = {
           ...snapshot,
-          managedSkills: reconcileMutatedSkills(snapshot.managedSkills, updatedAll)
+          managedSkills: reconcileMutatedSkills(
+            snapshot.managedSkills,
+            updatedAll,
+            rollbackSnapshot,
+            failedSkillIds
+          )
         };
       }
-      if (conflicts.length > 0 || readonlyBlocked.length > 0) {
-        const parts = [];
-        if (conflicts.length > 0) {
-          parts.push(`\u5B58\u5728\u672A\u7EB3\u7BA1\u540C\u540D\u76EE\u5F55\u51B2\u7A81\uFF0C\u672A\u8986\u76D6\u539F\u6709\u76EE\u5F55\uFF1A${conflicts.join("\uFF1B")}`);
-        }
-        if (readonlyBlocked.length > 0) {
-          parts.push(`\u53EA\u8BFB\u63D2\u4EF6\u8DEF\u5F84\u5DF2\u62E6\u622A\u4FDD\u62A4\uFF1A${readonlyBlocked.join("\uFF1B")}`);
-        }
-        actionAlert = { kind: "warn", message: parts.join(" | ") };
+      const label = input2.items.length === 1 ? `\u300C${input2.items[0].name}\u300D` : `${input2.items.length} \u4E2A\u6280\u80FD`;
+      const feedback = summarizeMutationFeedback(results, label);
+      if (feedback.kind === "error") {
+        actionAlert = {
+          kind: "error",
+          message: feedback.message,
+          retry: () => void runMutation(input2)
+        };
+      } else if (feedback.kind === "warn") {
+        actionAlert = { kind: "warn", message: feedback.message };
       } else {
         showToast(input2.successText);
       }

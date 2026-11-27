@@ -156,13 +156,14 @@ export async function auditSkillsHealth(input: SkillAuditInput): Promise<SkillAu
   })
 
   for (const item of scanPlan.items) {
+    const candidateAgent = agentByCandidatePath.get(item.originPath)
     if (item.disposition === 'adoptable' && item.mergePaths.length > 0) {
       findings.push({
         kind: 'duplicate-same-digest',
         severity: 'info',
         skillId: item.id,
         path: item.originPath,
-        agent: agentByCandidatePath.get(item.originPath),
+        ...(candidateAgent ? { agent: candidateAgent } : {}),
         message: `${item.mergePaths.length + 1} identical copies found across agent roots`
       })
     } else if (item.disposition === 'conflict') {
@@ -171,7 +172,7 @@ export async function auditSkillsHealth(input: SkillAuditInput): Promise<SkillAu
         severity: 'error',
         skillId: item.id,
         path: item.originPath,
-        agent: agentByCandidatePath.get(item.originPath),
+        ...(candidateAgent ? { agent: candidateAgent } : {}),
         message: `${item.conflicts.length} conflicting variants with differing content digests`
       })
     } else if (item.disposition === 'copy-drifted') {
@@ -180,7 +181,7 @@ export async function auditSkillsHealth(input: SkillAuditInput): Promise<SkillAu
         severity: 'warning',
         skillId: item.id,
         path: item.originPath,
-        agent: agentByCandidatePath.get(item.originPath),
+        ...(candidateAgent ? { agent: candidateAgent } : {}),
         message: 'copyMode placement has local edits differing from Vault master'
       })
     } else if (item.disposition === 'copy-outdated') {
@@ -189,7 +190,7 @@ export async function auditSkillsHealth(input: SkillAuditInput): Promise<SkillAu
         severity: 'info',
         skillId: item.id,
         path: item.originPath,
-        agent: agentByCandidatePath.get(item.originPath),
+        ...(candidateAgent ? { agent: candidateAgent } : {}),
         message: 'copyMode placement is behind Vault master digest and can be refreshed'
       })
     }
@@ -222,7 +223,7 @@ export async function auditSkillsHealth(input: SkillAuditInput): Promise<SkillAu
         severity: 'warning',
         skillId: pluginSkill.id,
         path: pluginSkill.skillDirectoryPath,
-        agent: pluginSkill.agent,
+        ...(pluginSkill.agent ? { agent: pluginSkill.agent } : {}),
         message: `Managed skill '${pluginSkill.id}' shares name with readonly plugin skill '${pluginSkill.pluginName}'`
       })
     }

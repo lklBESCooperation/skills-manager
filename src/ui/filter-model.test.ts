@@ -6,7 +6,9 @@ import {
   filterManagedSkills,
   filterPluginSkills,
   reconcileMutatedSkills,
-  rollbackOptimisticMutation
+  reconcileQuickPanelSkills,
+  rollbackOptimisticMutation,
+  summarizeMutationFeedback
 } from './filter-model'
 
 function makeManaged(overrides: Partial<ManagedSkillViewItem>): ManagedSkillViewItem {
@@ -99,5 +101,91 @@ describe('filter-model and optimistic rollback', () => {
     })
     const reconciled = reconcileMutatedSkills(nextSkills, [serverConfirmed])
     expect(reconciled[0]?.enabledAgentCount).toBe(0)
+  })
+
+  it('surfaces error/warn feedback and rolls back when mutation returns failed/conflicts/readonlyBlocked', () => {
+    const original = [
+      makeManaged({
+        rowKey: 'user:rex',
+        id: 'rex',
+        name: 'Rex',
+        sourceKind: 'canonical-unindexed',
+        effective: 'enabled',
+        origin: 'user'
+      })
+    ]
+
+    const { nextSkills, rollbackSnapshot } = applyOptimisticMutation(
+      original,
+      new Set(['user:rex']),
+      'disabled',
+      'project'
+    )
+    expect(nextSkills[0]?.effective).toBe('disabled')
+
+    // Case 1: worker returns status: 'conflict' with failed + unmutated [rex]
+    const failedWithServerEcho = {
+      status: 'conflict' as const,
+      updatedSkills: original,
+      conflicts: [],
+      readonlyBlocked: [],
+      failed: [{ skillId: 'rex', error: 'skill-enablement-unknown-skill: rex' }]
+    }
+    const feedback1 = summarizeMutationFeedback([failedWithServerEcho], '「Rex」')
+    expect(feedback1.kind).toBe('error')
+    if (feedback1.kind === 'error') {
+      expect(feedback1.message).toContain('skill-enablement-unknown-skill')
+    }
+    const reconciledPage = reconcileMutatedSkills(
+      nextSkills,
+      failedWithServerEcho.updatedSkills,
+      rollbackSnapshot,
+      new Set(['rex'])
+    )
+    expect(reconciledPage[0]?.effective).toBe('enabled')
+
+    // Case 2: worker returns failed with empty updatedSkills -> rollbackSnapshot restores original
+    const reconciledPanel = reconcileQuickPanelSkills(
+      nextSkills.map(({ agents: _a, agentDetails: _d, ...rest }) => rest),
+      [],
+      new Map(
+        [...rollbackSnapshot.entries()].map(([k, { agents: _a, agentDetails: _d, ...rest }]) => [
+          k,
+          rest
+        ])
+      ),
+      new Set(['rex'])
+    )
+    expect(reconciledPanel[0]?.effective).toBe('enabled')
+
+    // Case 3: conflicts / readonlyBlocked produce warn (never success)
+    const conflictFeedback = summarizeMutationFeedback(
+      [
+        {
+          conflicts: [{ skillId: 'rex', provider: 'claude', rootPath: '/x' }],
+          readonlyBlocked: [],
+          failed: []
+        }
+      ],
+      '「Rex」'
+    )
+    expect(conflictFeedback.kind).toBe('warn')
+
+    const roFeedback = summarizeMutationFeedback(
+      [
+        {
+          conflicts: [],
+          readonlyBlocked: [{ skillId: 'sys', provider: 'codex', rootPath: '/sys' }],
+          failed: []
+        }
+      ],
+      '「Sys」'
+    )
+    expect(roFeedback.kind).toBe('warn')
+
+    // Case 4: clean response produces success
+    expect(
+      summarizeMutationFeedback([{ conflicts: [], readonlyBlocked: [], failed: [] }], '「Rex」')
+    ).toEqual({ kind: 'success' })
   })
 })
