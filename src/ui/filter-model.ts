@@ -2,7 +2,8 @@ import type { PluginSkillRecord } from '../contracts/plugin-skill-contract'
 import type {
   AdoptableSkillViewItem,
   ManagedSkillViewItem,
-  QuickPanelSkillItem
+  QuickPanelSkillItem,
+  SkillMutateOutput
 } from '../contracts/skill-ui-bridge-contract'
 
 export type ScopeFilter = 'all' | 'user' | 'workspace'
@@ -126,26 +127,109 @@ export function rollbackOptimisticMutation<T extends QuickPanelSkillItem>(
 
 export function reconcileMutatedSkills(
   skills: readonly ManagedSkillViewItem[],
-  updatedSkills: readonly ManagedSkillViewItem[]
+  updatedSkills: readonly ManagedSkillViewItem[],
+  rollbackSnapshot?: ReadonlyMap<string, ManagedSkillViewItem>,
+  failedSkillIds?: ReadonlySet<string>
 ): ManagedSkillViewItem[] {
-  if (updatedSkills.length === 0) {
-    return [...skills]
-  }
-  const updatedByKey = new Map(updatedSkills.map((item) => [item.rowKey, item]))
-  return skills.map((item) => updatedByKey.get(item.rowKey) ?? item)
+  return reconcileMutationResult(
+    skills,
+    updatedSkills,
+    rollbackSnapshot,
+    failedSkillIds,
+    (item) => item
+  )
 }
 
 export function reconcileQuickPanelSkills(
   skills: readonly QuickPanelSkillItem[],
-  updatedSkills: readonly ManagedSkillViewItem[]
+  updatedSkills: readonly ManagedSkillViewItem[],
+  rollbackSnapshot?: ReadonlyMap<string, QuickPanelSkillItem>,
+  failedSkillIds?: ReadonlySet<string>
 ): QuickPanelSkillItem[] {
-  if (updatedSkills.length === 0) {
-    return [...skills]
-  }
-  const updatedByKey = new Map<string, QuickPanelSkillItem>(
-    updatedSkills.map(({ agents: _a, agentDetails: _d, ...rest }) => [rest.rowKey, rest])
+  return reconcileMutationResult(
+    skills,
+    updatedSkills,
+    rollbackSnapshot,
+    failedSkillIds,
+    ({ agents: _a, agentDetails: _d, ...rest }) => rest
   )
-  return skills.map((item) => updatedByKey.get(item.rowKey) ?? item)
+}
+
+function reconcileMutationResult<T extends QuickPanelSkillItem>(
+  skills: readonly T[],
+  updatedSkills: readonly ManagedSkillViewItem[],
+  rollbackSnapshot: ReadonlyMap<string, T> | undefined,
+  failedSkillIds: ReadonlySet<string> | undefined,
+  toItem: (skill: ManagedSkillViewItem) => T
+): T[] {
+  const updatedByKey = new Map<string, T>(
+    updatedSkills.map((skill) => {
+      const mapped = toItem(skill)
+      return [mapped.rowKey, mapped]
+    })
+  )
+  return skills.map((item) => {
+    const serverItem = updatedByKey.get(item.rowKey)
+    if (serverItem) {
+      return serverItem
+    }
+    if (failedSkillIds?.has(item.id) && rollbackSnapshot?.has(item.rowKey)) {
+      return rollbackSnapshot.get(item.rowKey)!
+    }
+    return item
+  })
+}
+
+export type MutationFeedbackSummary =
+  | { kind: 'success' }
+  | { kind: 'warn'; message: string }
+  | { kind: 'error'; message: string }
+
+export function summarizeMutationFeedback(
+  results: readonly Pick<SkillMutateOutput, 'conflicts' | 'readonlyBlocked' | 'failed'>[],
+  targetLabel?: string
+): MutationFeedbackSummary {
+  const conflicts: string[] = []
+  const readonlyBlocked: string[] = []
+  const failed: string[] = []
+
+  for (const res of results) {
+    for (const c of res.conflicts) {
+      conflicts.push(`${c.skillId} (${c.provider}: ${c.rootPath})`)
+    }
+    for (const r of res.readonlyBlocked) {
+      readonlyBlocked.push(`${r.skillId} (${r.provider})`)
+    }
+    for (const f of res.failed) {
+      failed.push(`${f.skillId}: ${f.error}`)
+    }
+  }
+
+  const issueParts: string[] = []
+  if (failed.length > 0) {
+    issueParts.push(`操作失败：${failed.join('；')}`)
+  }
+  if (conflicts.length > 0) {
+    issueParts.push(`存在未纳管同名目录冲突，未覆盖原有目录：${conflicts.join('；')}`)
+  }
+  if (readonlyBlocked.length > 0) {
+    issueParts.push(`只读插件路径已拦截保护：${readonlyBlocked.join('；')}`)
+  }
+
+  if (failed.length > 0) {
+    const prefix = targetLabel ? `切换 ${targetLabel} 状态失败，已回滚至原状态：` : ''
+    return {
+      kind: 'error',
+      message: `${prefix}${issueParts.join(' | ')}`
+    }
+  }
+  if (issueParts.length > 0) {
+    return {
+      kind: 'warn',
+      message: issueParts.join(' | ')
+    }
+  }
+  return { kind: 'success' }
 }
 
 export function formatSourceKindLabel(kind: ManagedSkillViewItem['sourceKind']): string {

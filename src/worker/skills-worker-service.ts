@@ -45,6 +45,7 @@ import {
   runSkillEnablementCommand,
   type SkillEnablementRuntimeInput
 } from '../enablement/skill-enablement-applier'
+import { isReadonlySkillTarget } from '../infra/readonly-root-fence'
 import { createLocalSkillEnablementFileIO } from '../infra/local-enablement-file-io'
 import { detectPackLocalAgents } from '../packs/pack-local-agent-detection'
 import type { SkillPackPreview } from '../packs/skill-pack-preview'
@@ -631,6 +632,7 @@ export class SkillsWorkerService {
     const home = this.options.homeDirectory
     const userVaultRoot = userSkillVaultRoot(home)
     const userCanonicalRoot = join(home, '.agents', 'skills')
+    const userVaultIds = await listDirectSubdirNames(userVaultRoot)
     const userInstalled = new Set(await listInstalledSkillIds(userVaultRoot, userCanonicalRoot))
     const wsVaultIds = ws ? await listDirectSubdirNames(projectSkillVaultRoot(ws)) : new Set<string>()
     const wsInstalled = ws
@@ -710,13 +712,27 @@ export class SkillsWorkerService {
     }
 
     if (userGroup.length > 0) {
+      const preAdopt = await this.adoptCanonicalSkillsBeforeMutation({
+        scope: 'user',
+        skillIds: userGroup,
+        vaultIds: userVaultIds,
+        installedIds: userInstalled,
+        home,
+        readonlyRoots
+      })
+      conflicts.push(...preAdopt.conflicts)
+      readonlyBlocked.push(...preAdopt.readonlyBlocked)
+      failed.push(...preAdopt.failed)
+
       const effectiveRuntimeScope = input.writeScope === 'project' || input.kind === 'inherit' ? 'workspace' : 'global'
       await executeGroup(
-        userGroup,
+        preAdopt.readySkillIds,
         {
           scope: effectiveRuntimeScope,
           homeDirectory: home,
-          ...(effectiveRuntimeScope === 'workspace' && ws ? { workspaceDirectory: ws } : {}),
+          ...(effectiveRuntimeScope === 'workspace' && ws
+            ? { workspaceDirectory: ws, canonicalRoot: null }
+            : {}),
           vaultRoot: userVaultRoot,
           indexPath: userSkillVaultIndexPath(home),
           stateDirectory: join(
@@ -733,8 +749,21 @@ export class SkillsWorkerService {
     }
 
     if (wsGroup.length > 0 && ws) {
+      const preAdopt = await this.adoptCanonicalSkillsBeforeMutation({
+        scope: 'workspace',
+        skillIds: wsGroup,
+        vaultIds: wsVaultIds,
+        installedIds: wsInstalled,
+        home,
+        ws,
+        readonlyRoots
+      })
+      conflicts.push(...preAdopt.conflicts)
+      readonlyBlocked.push(...preAdopt.readonlyBlocked)
+      failed.push(...preAdopt.failed)
+
       await executeGroup(
-        wsGroup,
+        preAdopt.readySkillIds,
         {
           scope: 'workspace',
           homeDirectory: home,
@@ -742,6 +771,7 @@ export class SkillsWorkerService {
           vaultRoot: projectSkillVaultRoot(ws),
           indexPath: projectSkillVaultIndexPath(ws),
           stateDirectory: join(ws, '.pmstudio', 'state'),
+          canonicalRoot: null,
           detectedProviders,
           readonlyRoots,
           fileIO: this.fileIO
@@ -764,13 +794,132 @@ export class SkillsWorkerService {
       throw new Error(failed.map((f) => `${f.skillId}: ${f.error}`).join('; '))
     }
 
+    const issueSkillIds = new Set([
+      ...conflicts.map((c) => c.skillId),
+      ...readonlyBlocked.map((r) => r.skillId),
+      ...failed.map((f) => f.skillId)
+    ])
+    const allRequestedHadIssues =
+      hasIssues && input.skillIds.every((skillId) => issueSkillIds.has(skillId))
+
     return {
-      status: !hasIssues ? 'applied' : updatedSkills.length > 0 && failed.length < input.skillIds.length ? 'partial' : 'conflict',
+      status: !hasIssues ? 'applied' : allRequestedHadIssues ? 'conflict' : 'partial',
       updatedSkills,
       conflicts,
       readonlyBlocked,
       failed
     }
+  }
+
+  /**
+   * Auto-adopt `canonical-unindexed` skills into their corresponding Vault before running
+   * enablement commands so both global and project-override mutations resolve the Vault master.
+   */
+  private async adoptCanonicalSkillsBeforeMutation(input: {
+    scope: SkillScopeKind
+    skillIds: readonly string[]
+    vaultIds: ReadonlySet<string>
+    installedIds: ReadonlySet<string>
+    home: string
+    ws?: string
+    readonlyRoots: readonly string[]
+  }): Promise<{
+    readySkillIds: string[]
+    conflicts: SkillMutateConflictItem[]
+    readonlyBlocked: SkillMutateConflictItem[]
+    failed: { skillId: string; error: string }[]
+  }> {
+    const needsAdopt = input.skillIds.filter(
+      (id) => !input.vaultIds.has(id) && input.installedIds.has(id)
+    )
+    const readySkillIds = input.skillIds.filter((id) => !needsAdopt.includes(id))
+    const conflicts: SkillMutateConflictItem[] = []
+    const readonlyBlocked: SkillMutateConflictItem[] = []
+    const failed: { skillId: string; error: string }[] = []
+
+    if (needsAdopt.length === 0) {
+      return { readySkillIds, conflicts, readonlyBlocked, failed }
+    }
+
+    const baseDir = input.scope === 'user' ? input.home : input.ws!
+    const vaultRoot =
+      input.scope === 'user' ? userSkillVaultRoot(input.home) : projectSkillVaultRoot(input.ws!)
+    const indexPath =
+      input.scope === 'user'
+        ? userSkillVaultIndexPath(input.home)
+        : projectSkillVaultIndexPath(input.ws!)
+    const canonicalRoot = join(baseDir, '.agents', 'skills')
+    const index = await readSkillVaultIndexWithLegacyFallback(
+      indexPath,
+      input.scope === 'workspace' ? legacyProjectSkillVaultIndexPath(input.ws!) : undefined
+    )
+    const candidatePaths = await collectCandidatePathsForScope(
+      input.scope === 'user' ? 'global' : 'workspace',
+      baseDir
+    )
+    const scanPlan = await scanSkillVault({
+      homeDirectory: input.home,
+      vaultRoot,
+      candidatePaths,
+      index,
+      readonlyRoots: input.readonlyRoots
+    })
+    const adoptById = new Map(adoptableSkillVaultItems(scanPlan).map((item) => [item.id, item]))
+    const conflictById = new Map(
+      scanPlan.items
+        .filter((item) => item.disposition === 'conflict')
+        .map((item) => [item.id, item])
+    )
+
+    for (const skillId of needsAdopt) {
+      const conflictItem = conflictById.get(skillId)
+      if (conflictItem) {
+        conflicts.push({
+          skillId,
+          provider: 'vault-adopt',
+          rootPath: conflictItem.originPath
+        })
+        continue
+      }
+      const adoptItem = adoptById.get(skillId)
+      if (adoptItem) {
+        try {
+          await adoptSkillsIntoVault({
+            homeDirectory: input.home,
+            vaultRoot,
+            indexPath,
+            items: [adoptItem],
+            readonlyRoots: input.readonlyRoots
+          })
+          readySkillIds.push(skillId)
+        } catch (error) {
+          failed.push({
+            skillId,
+            error: error instanceof Error ? error.message : String(error)
+          })
+        }
+        continue
+      }
+      const canonicalCandidate = join(canonicalRoot, skillId)
+      if (
+        await isReadonlySkillTarget(canonicalCandidate, {
+          readonlyRoots: input.readonlyRoots
+        })
+      ) {
+        readonlyBlocked.push({
+          skillId,
+          provider: 'readonly',
+          rootPath: canonicalCandidate
+        })
+      } else {
+        failed.push({
+          skillId,
+          error: `skill-canonical-adopt-unavailable: ${skillId}`
+        })
+      }
+    }
+
+    return { readySkillIds, conflicts, readonlyBlocked, failed }
   }
 
   async adoptSkills(input: SkillAdoptInput): Promise<SkillAdoptOutput> {

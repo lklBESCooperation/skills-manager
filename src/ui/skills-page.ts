@@ -3,6 +3,7 @@ import type {
   AdoptableSkillViewItem,
   AgentRegistrySummaryItem,
   ManagedSkillViewItem,
+  SkillMutateOutput,
   WorkbenchSnapshotOutput
 } from '../contracts/skill-ui-bridge-contract'
 import { bridgeClient, formatBridgeError } from './bridge-client'
@@ -17,6 +18,7 @@ import {
   hasActiveFilters,
   reconcileMutatedSkills,
   rollbackOptimisticMutation,
+  summarizeMutationFeedback,
   type ScopeFilter,
   type StatusFilter,
   type WorkbenchFilterCriteria
@@ -204,8 +206,7 @@ export function mountSkillsWorkbench(): void {
 
     try {
       let updatedAll: ManagedSkillViewItem[] = []
-      const conflicts: string[] = []
-      const readonlyBlocked: string[] = []
+      const results: SkillMutateOutput[] = []
 
       for (const [skillScope, items] of byScope.entries()) {
         const res = await bridgeClient.mutateEnablement({
@@ -215,31 +216,34 @@ export function mountSkillsWorkbench(): void {
           skillScope,
           ...(input.agents ? { agents: input.agents } : {})
         })
+        results.push(res)
         updatedAll = [...updatedAll, ...res.updatedSkills]
-        for (const c of res.conflicts) {
-          conflicts.push(`${c.skillId} (${c.provider}: ${c.rootPath})`)
-        }
-        for (const r of res.readonlyBlocked) {
-          readonlyBlocked.push(`${r.skillId} (${r.provider})`)
-        }
       }
 
+      const failedSkillIds = new Set(results.flatMap((r) => r.failed.map((f) => f.skillId)))
       if (snapshot) {
         snapshot = {
           ...snapshot,
-          managedSkills: reconcileMutatedSkills(snapshot.managedSkills, updatedAll)
+          managedSkills: reconcileMutatedSkills(
+            snapshot.managedSkills,
+            updatedAll,
+            rollbackSnapshot,
+            failedSkillIds
+          )
         }
       }
 
-      if (conflicts.length > 0 || readonlyBlocked.length > 0) {
-        const parts: string[] = []
-        if (conflicts.length > 0) {
-          parts.push(`存在未纳管同名目录冲突，未覆盖原有目录：${conflicts.join('；')}`)
+      const label =
+        input.items.length === 1 ? `「${input.items[0].name}」` : `${input.items.length} 个技能`
+      const feedback = summarizeMutationFeedback(results, label)
+      if (feedback.kind === 'error') {
+        actionAlert = {
+          kind: 'error',
+          message: feedback.message,
+          retry: () => void runMutation(input)
         }
-        if (readonlyBlocked.length > 0) {
-          parts.push(`只读插件路径已拦截保护：${readonlyBlocked.join('；')}`)
-        }
-        actionAlert = { kind: 'warn', message: parts.join(' | ') }
+      } else if (feedback.kind === 'warn') {
+        actionAlert = { kind: 'warn', message: feedback.message }
       } else {
         showToast(input.successText)
       }

@@ -8,7 +8,8 @@ import {
   applyOptimisticMutation,
   filterManagedSkills,
   reconcileQuickPanelSkills,
-  rollbackOptimisticMutation
+  rollbackOptimisticMutation,
+  summarizeMutationFeedback
 } from './filter-model'
 
 type PanelState = {
@@ -108,10 +109,28 @@ export function mountSkillsPanel(): void {
         writeScope,
         skillScope: item.scope
       })
+      const failedSkillIds = new Set(res.failed.map((f) => f.skillId))
       if (state.snapshot) {
         state.snapshot = {
           ...state.snapshot,
-          managedSkills: reconcileQuickPanelSkills(state.snapshot.managedSkills, res.updatedSkills)
+          managedSkills: reconcileQuickPanelSkills(
+            state.snapshot.managedSkills,
+            res.updatedSkills,
+            rollbackSnapshot,
+            failedSkillIds
+          )
+        }
+      }
+      const feedback = summarizeMutationFeedback([res], `「${item.name}」`)
+      if (feedback.kind === 'error') {
+        state.actionError = {
+          message: feedback.message,
+          retry: () => void toggleSkill(item)
+        }
+      } else if (feedback.kind === 'warn') {
+        state.actionError = {
+          message: feedback.message,
+          retry: null
         }
       }
     } catch (error) {
