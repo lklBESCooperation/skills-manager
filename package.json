@@ -1,6 +1,6 @@
 {
   "name": "@pmstudio/skills-manager",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "files": [
     "dist",
     "orca-plugin.json",
@@ -90,11 +90,16 @@
       "orca-source": "./src/contracts/skill-audit-contract.ts",
       "types": "./dist/contracts/skill-audit-contract.d.ts",
       "default": "./dist/contracts/skill-audit-contract.js"
+    },
+    "./contracts/skill-ui-bridge-contract": {
+      "orca-source": "./src/contracts/skill-ui-bridge-contract.ts",
+      "types": "./dist/contracts/skill-ui-bridge-contract.d.ts",
+      "default": "./dist/contracts/skill-ui-bridge-contract.js"
     }
   },
   "scripts": {
-    "typecheck": "tsc -p tsconfig.contracts.json && tsc -p tsconfig.test.json",
-    "build": "tsc -p tsconfig.contracts.json && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.contracts.json && tsc -p tsconfig.worker.json && tsc -p tsconfig.test.json",
+    "build": "tsc -p tsconfig.contracts.json && tsc -p tsconfig.json && node scripts/build-plugin-bundles.mjs",
     "prepare": "pnpm build",
     "test": "vitest run --maxWorkers=2"
   },
@@ -103,6 +108,7 @@
   },
   "devDependencies": {
     "@types/node": "^18.19.130",
+    "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
     "vitest": "5.0.5"
   },

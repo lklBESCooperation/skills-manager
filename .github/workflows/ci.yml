@@ -40,4 +40,4 @@ jobs:
       - name: Rebuild dist and verify prebuilt sync
         run: |
           pnpm build
-          git diff --exit-code dist/
+          git diff --exit-code dist/ ui/

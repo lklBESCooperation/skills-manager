@@ -1,6 +1,9 @@
 {
   "extends": "./tsconfig.json",
-  "compilerOptions": { "noEmit": true },
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"]
+  },
   "include": ["src/**/*.ts"],
-  "exclude": []
+  "exclude": ["src/worker/plugin-worker.ts"]
 }

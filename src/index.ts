@@ -17,6 +17,7 @@ export * from './infra/skill-provider-destinations'
 export * from './infra/skill-state-store'
 export * from './infra/skill-alias'
 export * from './infra/readonly-root-fence'
+export * from './infra/local-enablement-file-io'
 export type {
   SkillEnablementFileIO,
   SkillEnablementScope,
@@ -29,6 +30,7 @@ export * from './vault/skill-vault-paths'
 export * from './vault/skill-vault-scan'
 export * from './vault/skill-vault-adopt'
 export * from './vault/skill-vault-index-service'
+export * from './vault/readonly-plugin-scanner'
 export * from './enablement/skill-enablement-planner'
 export * from './enablement/skill-enablement-journal'
 export * from './enablement/skill-enablement-applier'
