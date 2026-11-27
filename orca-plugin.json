@@ -7,7 +7,7 @@
   "description": "Unified Skills Vault, Packs, Marketplace & Read-Only Plugin Skills workbench across all PMStudio agents.",
   "execution": "sandboxed-ui",
   "engines": {
-    "orca": ">=1.4.273"
+    "orca": ">=1.4.274"
   },
   "capabilities": [
     { "kind": "workspace:read" },
