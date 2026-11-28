@@ -343,7 +343,7 @@ export function createPluginAuditTabController(): PluginAuditTabController {
           el(
             'span',
             undefined,
-            'Plugin Skills 只读区：以下技能由宿主或 Agent 插件自带并托管。为避免破坏插件完整性与更新校验，此处不支持启用/停用开关、编辑、删除或 Adopt 纳管。'
+            'Plugin Skills 只读区：以下技能由宿主或 Agent 插件自带并托管。为避免破坏插件完整性与更新校验，此处不支持启用/停用开关、编辑、删除或纳管。'
           )
         )
       )
