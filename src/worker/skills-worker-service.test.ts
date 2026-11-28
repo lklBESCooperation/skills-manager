@@ -2,7 +2,11 @@ import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { SkillMutateInputSchema } from '../contracts/skill-ui-bridge-contract'
+import {
+  SKILL_BRIDGE_METHODS,
+  SkillAgentMatrixInputSchema,
+  SkillMutateInputSchema
+} from '../contracts/skill-ui-bridge-contract'
 import { SkillsWorkerService } from './skills-worker-service'
 
 const roots: string[] = []
@@ -80,6 +84,11 @@ describe('SkillsWorkerService', () => {
     expect(snap.managedSkills.find((s) => s.id === 'beta-canonical')?.sourceKind).toBe(
       'canonical-unindexed'
     )
+    for (const item of snap.managedSkills) {
+      expect('agents' in item).toBe(false)
+      expect('agentDetails' in item).toBe(false)
+      expect(item.supportedAgentCount).toBeGreaterThan(0)
+    }
     expect(snap.adoptableSkills.map((a) => a.id)).toEqual(['beta-canonical', 'delta-adopt'])
     expect(snap.pluginSkills.map((p) => p.id)).toEqual(['codex-sys'])
 
@@ -103,7 +112,19 @@ describe('SkillsWorkerService', () => {
       agents: { claude: false }
     })
     const perAgentRes = await service.mutateEnablement(perAgentInput)
-    expect(perAgentRes.updatedSkills[0]?.agents.claude).toBe(false)
+    expect('agents' in perAgentRes.updatedSkills[0]!).toBe(false)
+    expect('agentDetails' in perAgentRes.updatedSkills[0]!).toBe(false)
+    expect(perAgentRes.updatedSkills[0]?.enabledAgentCount).toBe(0)
+
+    const alphaMatrix = await service.getSkillAgentMatrix({
+      skillId: 'alpha-skill',
+      scope: 'user'
+    })
+    expect(alphaMatrix.rowKey).toBe('user:alpha-skill')
+    expect(alphaMatrix.agents.claude).toBe(false)
+    expect(alphaMatrix.agentDetails.claude?.origin).toBe('agent-override')
+    expect(Object.keys(alphaMatrix.agents)).toHaveLength(45)
+    expect(Object.keys(alphaMatrix.agentDetails)).toHaveLength(45)
 
     const inherited = await service.mutateEnablement({
       kind: 'inherit',
@@ -317,5 +338,163 @@ describe('SkillsWorkerService', () => {
     expect(failedRes.status).toBe('conflict')
     expect(failedRes.failed.some((f) => f.skillId === 'link-skill')).toBe(true)
     expect(failedRes.updatedSkills[0]?.effective).toBe('enabled')
+  })
+
+  it('keeps workbench snapshot well under 1 MiB for 360+ skills and truncates long descriptions', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'orca-worker-scale-'))
+    roots.push(home)
+
+    const userVault = join(home, '.pmstudio', 'skills')
+    const claudeRoot = join(home, '.claude', 'skills')
+    const codexSysRoot = join(home, '.codex', 'skills', '.system')
+    await mkdir(userVault, { recursive: true })
+    await mkdir(claudeRoot, { recursive: true })
+    await mkdir(codexSysRoot, { recursive: true })
+
+    const longDesc = 'Long skill description segment. '.repeat(35)
+    expect(longDesc.length).toBeGreaterThan(1000)
+
+    await Promise.all([
+      ...Array.from({ length: 360 }, (_, idx) => {
+        const id = `skill-${String(idx).padStart(3, '0')}`
+        return createTestSkill(userVault, id, `Skill ${idx}`, longDesc)
+      }),
+      createTestSkill(claudeRoot, 'adopt-long', 'Adopt Long', longDesc),
+      createTestSkill(codexSysRoot, 'plugin-long', 'Plugin Long', longDesc)
+    ])
+
+    const service = new SkillsWorkerService({
+      homeDirectory: home,
+      etcCodexSkillsRoot: join(home, 'none-etc-codex'),
+      hostBridge: {
+        readWorkspaceContext: async () => null,
+        listWorkspaces: async () => ({ workspaces: [] })
+      }
+    })
+
+    const snap = await service.getWorkbenchSnapshot()
+    expect(snap.managedSkills).toHaveLength(360)
+    for (const item of snap.managedSkills) {
+      expect('agents' in item).toBe(false)
+      expect('agentDetails' in item).toBe(false)
+      expect(item.description).not.toBeNull()
+      expect(item.description!.length).toBeLessThanOrEqual(300)
+      expect(item.description!.endsWith('…')).toBe(true)
+      expect(item.enabledAgentCount).toBe(item.supportedAgentCount)
+    }
+
+    expect(snap.adoptableSkills[0]?.description?.length).toBeLessThanOrEqual(300)
+    expect(snap.adoptableSkills[0]?.description?.endsWith('…')).toBe(true)
+    expect(snap.pluginSkills[0]?.description?.length).toBeLessThanOrEqual(300)
+    expect(snap.pluginSkills[0]?.description?.endsWith('…')).toBe(true)
+
+    const payloadBytes = Buffer.byteLength(JSON.stringify(snap), 'utf8')
+    expect(payloadBytes).toBeLessThan(1_048_576)
+    expect(payloadBytes).toBeLessThan(350_000)
+  })
+
+  it('serves full 45-agent matrix on demand via getSkillAgentMatrix and plugin-worker handler', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'orca-worker-matrix-'))
+    roots.push(home)
+
+    const wsDir = join(home, 'repo-ws')
+    await mkdir(join(home, '.pmstudio', 'skills'), { recursive: true })
+    await mkdir(join(wsDir, '.pmstudio', 'skills'), { recursive: true })
+    await createTestSkill(join(home, '.pmstudio', 'skills'), 'user-skill', 'User Skill', 'Global')
+    await createTestSkill(join(wsDir, '.pmstudio', 'skills'), 'ws-skill', 'WS Skill', 'Workspace')
+
+    let hasWorkspace = true
+    const service = new SkillsWorkerService({
+      homeDirectory: home,
+      etcCodexSkillsRoot: join(home, 'none-etc-codex'),
+      hostBridge: {
+        readWorkspaceContext: async () =>
+          hasWorkspace
+            ? { workspaceId: 'ws-1', branch: 'main', displayName: 'repo-ws' }
+            : null,
+        listWorkspaces: async () => ({
+          workspaces: hasWorkspace
+            ? [
+                {
+                  id: 'ws-1',
+                  kind: 'worktree',
+                  name: 'repo-ws',
+                  path: wsDir,
+                  branch: 'main',
+                  hostId: 'local'
+                }
+              ]
+            : []
+        })
+      }
+    })
+
+    await service.mutateEnablement({
+      kind: 'disable',
+      skillIds: ['ws-skill'],
+      writeScope: 'project',
+      skillScope: 'workspace',
+      agents: { claude: false }
+    })
+
+    const wsMatrix = await service.getSkillAgentMatrix({ skillId: 'ws-skill', scope: 'workspace' })
+    expect(wsMatrix.rowKey).toBe('workspace:ws-skill')
+    expect(Object.keys(wsMatrix.agents)).toHaveLength(45)
+    expect(Object.keys(wsMatrix.agentDetails)).toHaveLength(45)
+    expect(wsMatrix.agents.claude).toBe(false)
+    expect(wsMatrix.agentDetails.claude?.origin).toBe('agent-override')
+    expect(wsMatrix.agents.codex).toBe(true)
+
+    await expect(
+      service.getSkillAgentMatrix({ skillId: 'missing-skill', scope: 'user' })
+    ).rejects.toThrow('skill-not-found: user:missing-skill')
+
+    hasWorkspace = false
+    await expect(
+      service.getSkillAgentMatrix({ skillId: 'ws-skill', scope: 'workspace' })
+    ).rejects.toThrow('skill-enablement-workspace-required')
+
+    expect(() => SkillAgentMatrixInputSchema.parse({ skillId: '', scope: 'user' })).toThrow()
+    expect(() => SkillAgentMatrixInputSchema.parse({ skillId: 'ok', scope: 'global' })).toThrow()
+
+    const workerSpec = './plugin-worker.ts'
+    const workerModule = (await import(workerSpec)) as {
+      default: (orca: {
+        host: { call: (m: string, p?: unknown) => Promise<unknown>; has: (m: string) => boolean }
+        events: { on: (e: string, h: (p: unknown) => void) => { dispose: () => void } }
+        panels: {
+          handle: (
+            n: string,
+            h: (input: unknown) => Promise<unknown> | unknown
+          ) => { dispose: () => void }
+          post: (e: string, p?: unknown) => void
+        }
+      }) => () => void
+    }
+    const handlers = new Map<string, (input: unknown) => Promise<unknown> | unknown>()
+    const dispose = workerModule.default({
+      host: {
+        call: async () => null,
+        has: () => false
+      },
+      events: {
+        on: () => ({ dispose: () => undefined })
+      },
+      panels: {
+        handle: (name, handler) => {
+          handlers.set(name, handler)
+          return { dispose: () => undefined }
+        },
+        post: () => undefined
+      }
+    })
+
+    try {
+      const matrixHandler = handlers.get(SKILL_BRIDGE_METHODS.skillAgentMatrix)
+      expect(matrixHandler).toBeDefined()
+      await expect(matrixHandler!({ skillId: '', scope: 'user' })).rejects.toThrow()
+    } finally {
+      dispose()
+    }
   })
 })

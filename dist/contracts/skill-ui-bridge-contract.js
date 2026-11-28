@@ -1,12 +1,13 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PackImportInputSchema = exports.PackRollbackInputSchema = exports.PackModeInputSchema = exports.PackIdInputSchema = exports.PackSaveInputSchema = exports.PackSaveCurrentInputSchema = exports.PackScopeInputSchema = exports.SkillAdoptInputSchema = exports.SkillMutateInputSchema = exports.SKILL_BRIDGE_EVENTS = exports.SKILL_BRIDGE_METHODS = void 0;
+exports.PackImportInputSchema = exports.PackRollbackInputSchema = exports.PackModeInputSchema = exports.PackIdInputSchema = exports.PackSaveInputSchema = exports.PackSaveCurrentInputSchema = exports.PackScopeInputSchema = exports.SkillAdoptInputSchema = exports.SkillMutateInputSchema = exports.SkillAgentMatrixInputSchema = exports.SKILL_BRIDGE_EVENTS = exports.SKILL_BRIDGE_METHODS = void 0;
 const zod_1 = require("zod");
 const skill_pack_contract_1 = require("./skill-pack-contract");
 const tui_agent_1 = require("./tui-agent");
 exports.SKILL_BRIDGE_METHODS = {
     workbenchSnapshot: 'skills.workbench.snapshot',
     panelSnapshot: 'skills.panel.snapshot',
+    skillAgentMatrix: 'skills.skill.agentMatrix',
     enablementMutate: 'skills.enablement.mutate',
     pluginsRescan: 'skills.plugins.rescan',
     vaultAdopt: 'skills.vault.adopt',
@@ -25,6 +26,12 @@ exports.SKILL_BRIDGE_EVENTS = {
     skillsChanged: 'skills.changed',
     contextChanged: 'skills.contextChanged'
 };
+exports.SkillAgentMatrixInputSchema = zod_1.z
+    .object({
+    skillId: zod_1.z.string().min(1).max(128),
+    scope: zod_1.z.enum(['user', 'workspace'])
+})
+    .strict();
 const AgentIdSchema = zod_1.z.enum(tui_agent_1.TUI_AGENTS);
 exports.SkillMutateInputSchema = zod_1.z
     .object({

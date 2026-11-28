@@ -24,6 +24,7 @@ import { TUI_AGENTS } from './tui-agent'
 export const SKILL_BRIDGE_METHODS = {
   workbenchSnapshot: 'skills.workbench.snapshot',
   panelSnapshot: 'skills.panel.snapshot',
+  skillAgentMatrix: 'skills.skill.agentMatrix',
   enablementMutate: 'skills.enablement.mutate',
   pluginsRescan: 'skills.plugins.rescan',
   vaultAdopt: 'skills.vault.adopt',
@@ -83,8 +84,8 @@ export type ManagedSkillViewItem = {
   origin: SkillEnablementOrigin
   enabledAgentCount: number
   supportedAgentCount: number
-  agents: Partial<Record<AgentId, boolean>>
-  agentDetails: Partial<Record<AgentId, EffectiveAgentSkillState>>
+  agents?: Partial<Record<AgentId, boolean>>
+  agentDetails?: Partial<Record<AgentId, EffectiveAgentSkillState>>
 }
 
 export type AdoptableSkillViewItem = {
@@ -118,6 +119,21 @@ export type QuickPanelSnapshotOutput = {
   pluginSkillCount: number
   adoptableCount: number
   generatedAt: number
+}
+
+export const SkillAgentMatrixInputSchema = z
+  .object({
+    skillId: z.string().min(1).max(128),
+    scope: z.enum(['user', 'workspace'])
+  })
+  .strict()
+
+export type SkillAgentMatrixInput = z.infer<typeof SkillAgentMatrixInputSchema>
+
+export type SkillAgentMatrixOutput = {
+  rowKey: string
+  agents: Partial<Record<AgentId, boolean>>
+  agentDetails: Partial<Record<AgentId, EffectiveAgentSkillState>>
 }
 
 const AgentIdSchema = z.enum(TUI_AGENTS)

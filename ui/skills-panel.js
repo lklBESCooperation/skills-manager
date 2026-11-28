@@ -19862,6 +19862,7 @@ var TUI_AGENT_SET = new Set(TUI_AGENTS);
 var SKILL_BRIDGE_METHODS = {
   workbenchSnapshot: "skills.workbench.snapshot",
   panelSnapshot: "skills.panel.snapshot",
+  skillAgentMatrix: "skills.skill.agentMatrix",
   enablementMutate: "skills.enablement.mutate",
   pluginsRescan: "skills.plugins.rescan",
   vaultAdopt: "skills.vault.adopt",
@@ -19880,6 +19881,10 @@ var SKILL_BRIDGE_EVENTS = {
   skillsChanged: "skills.changed",
   contextChanged: "skills.contextChanged"
 };
+var SkillAgentMatrixInputSchema = external_exports.object({
+  skillId: external_exports.string().min(1).max(128),
+  scope: external_exports.enum(["user", "workspace"])
+}).strict();
 var AgentIdSchema = external_exports.enum(TUI_AGENTS);
 var SkillMutateInputSchema = external_exports.object({
   kind: external_exports.enum(["enable", "disable", "inherit"]),

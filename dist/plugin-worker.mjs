@@ -19872,6 +19872,7 @@ function isTuiAgent(value) {
 var SKILL_BRIDGE_METHODS = {
   workbenchSnapshot: "skills.workbench.snapshot",
   panelSnapshot: "skills.panel.snapshot",
+  skillAgentMatrix: "skills.skill.agentMatrix",
   enablementMutate: "skills.enablement.mutate",
   pluginsRescan: "skills.plugins.rescan",
   vaultAdopt: "skills.vault.adopt",
@@ -19890,6 +19891,10 @@ var SKILL_BRIDGE_EVENTS = {
   skillsChanged: "skills.changed",
   contextChanged: "skills.contextChanged"
 };
+var SkillAgentMatrixInputSchema = external_exports.object({
+  skillId: external_exports.string().min(1).max(128),
+  scope: external_exports.enum(["user", "workspace"])
+}).strict();
 var AgentIdSchema = external_exports.enum(TUI_AGENTS);
 var SkillMutateInputSchema = external_exports.object({
   kind: external_exports.enum(["enable", "disable", "inherit"]),
@@ -23767,6 +23772,23 @@ function toIndexEntry(record2, now, copyMode) {
 
 // src/worker/skills-worker-service.ts
 var MAX_SKILL_MD_BYTES = 256 * 1024;
+var MAX_SNAPSHOT_DESCRIPTION_CHARS = 300;
+function truncateDescription(description) {
+  if (description === null || description.length <= MAX_SNAPSHOT_DESCRIPTION_CHARS) {
+    return description;
+  }
+  return `${description.slice(0, MAX_SNAPSHOT_DESCRIPTION_CHARS - 1).trimEnd()}\u2026`;
+}
+function omitAgentMatrix(item) {
+  const { agents: _agents, agentDetails: _details, ...rest } = item;
+  return rest;
+}
+function truncatePluginDescriptions(skills) {
+  return skills.map((skill) => ({
+    ...skill,
+    description: truncateDescription(skill.description)
+  }));
+}
 function isLocalHostId(hostId) {
   return hostId === null || hostId === void 0 || hostId === "local";
 }
@@ -23916,7 +23938,7 @@ var SkillsWorkerService = class {
         ...this.options.etcCodexSkillsRoot ? { etcCodexSkillsRoot: this.options.etcCodexSkillsRoot } : {}
       });
       return {
-        pluginSkills: result.skills,
+        pluginSkills: truncatePluginDescriptions(result.skills),
         readonlyRoots: result.readonlyRoots,
         pluginScanError: null
       };
@@ -23927,6 +23949,30 @@ var SkillsWorkerService = class {
         pluginScanError: error62 instanceof Error ? error62.message : String(error62)
       };
     }
+  }
+  async resolveWorkspaceSkillIds(ws, userSkillIds) {
+    const userVaultRoot = userSkillVaultRoot(this.options.homeDirectory);
+    const wsVaultRoot = projectSkillVaultRoot(ws);
+    const wsCanonicalRoot = join18(ws, ".agents", "skills");
+    const [wsVaultIds, rawWsSkillIds] = await Promise.all([
+      listDirectSubdirNames(wsVaultRoot),
+      listInstalledSkillIds(wsVaultRoot, wsCanonicalRoot)
+    ]);
+    const userIdSet = new Set(userSkillIds);
+    const wsSkillIds = [];
+    for (const id of rawWsSkillIds) {
+      if (wsVaultIds.has(id)) {
+        wsSkillIds.push(id);
+        continue;
+      }
+      if (userIdSet.has(id) && await isSymlinkIntoRoot(join18(wsCanonicalRoot, id), userVaultRoot)) {
+        continue;
+      }
+      if (!userIdSet.has(id)) {
+        wsSkillIds.push(id);
+      }
+    }
+    return { wsVaultRoot, wsVaultIds, wsSkillIds };
   }
   async collectManagedAndAdoptable(input2) {
     const home = this.options.homeDirectory;
@@ -23959,29 +24005,15 @@ var SkillsWorkerService = class {
     let wsVaultIds = /* @__PURE__ */ new Set();
     let wsVaultRoot = "";
     if (ws) {
-      wsVaultRoot = projectSkillVaultRoot(ws);
       const wsIndexPath = projectSkillVaultIndexPath(ws);
-      const wsCanonicalRoot = join18(ws, ".agents", "skills");
-      const [loadedWsIndex, loadedWsVaultIds, rawWsSkillIds] = await Promise.all([
+      const [loadedWsIndex, resolvedWs] = await Promise.all([
         readSkillVaultIndexWithLegacyFallback(wsIndexPath, legacyProjectSkillVaultIndexPath(ws)),
-        listDirectSubdirNames(wsVaultRoot),
-        listInstalledSkillIds(wsVaultRoot, wsCanonicalRoot)
+        this.resolveWorkspaceSkillIds(ws, userSkillIds)
       ]);
       wsIndex = loadedWsIndex;
-      wsVaultIds = loadedWsVaultIds;
-      const userIdSet = new Set(userSkillIds);
-      for (const id of rawWsSkillIds) {
-        if (wsVaultIds.has(id)) {
-          wsSkillIds.push(id);
-          continue;
-        }
-        if (userIdSet.has(id) && await isSymlinkIntoRoot(join18(wsCanonicalRoot, id), userVaultRoot)) {
-          continue;
-        }
-        if (!userIdSet.has(id)) {
-          wsSkillIds.push(id);
-        }
-      }
+      wsVaultRoot = resolvedWs.wsVaultRoot;
+      wsVaultIds = resolvedWs.wsVaultIds;
+      wsSkillIds = resolvedWs.wsSkillIds;
     }
     const userResolution = resolveEffectiveSkills({
       installed: userSkillIds,
@@ -24041,7 +24073,7 @@ var SkillsWorkerService = class {
           rowKey: `${params.scope}:${id}`,
           id,
           name,
-          description,
+          description: truncateDescription(description),
           sourceKind,
           scope: params.scope,
           tags: entry?.tags ?? [],
@@ -24103,7 +24135,7 @@ var SkillsWorkerService = class {
             rowKey: `${scope}:${item.id}`,
             id: item.id,
             name: summary.name ?? item.id,
-            description: summary.description,
+            description: truncateDescription(summary.description),
             scope,
             disposition: item.disposition,
             digest: item.digest,
@@ -24141,7 +24173,7 @@ var SkillsWorkerService = class {
         isLocalDirectoryAvailable: activeWorkspace.isLocalDirectoryAvailable
       },
       agentRegistry: this.agentRegistry,
-      managedSkills,
+      managedSkills: managedSkills.map(omitAgentMatrix),
       adoptableSkills,
       pluginSkills,
       pluginScanError,
@@ -24165,10 +24197,63 @@ var SkillsWorkerService = class {
         workspaceName: activeWorkspace.workspaceName,
         isLocalDirectoryAvailable: activeWorkspace.isLocalDirectoryAvailable
       },
-      managedSkills: managedSkills.map(({ agents: _agents, agentDetails: _details, ...rest }) => rest),
+      managedSkills: managedSkills.map(omitAgentMatrix),
       pluginSkillCount: pluginSkills.length,
       adoptableCount: adoptableSkills.length,
       generatedAt: Date.now()
+    };
+  }
+  async getSkillAgentMatrix(input2) {
+    const activeWorkspace = await this.resolveActiveWorkspace();
+    const ws = activeWorkspace.workspaceDirectory;
+    if (input2.scope === "workspace" && !ws) {
+      throw new Error("skill-enablement-workspace-required");
+    }
+    const home = this.options.homeDirectory;
+    const userVaultRoot = userSkillVaultRoot(home);
+    const userIndexPath = userSkillVaultIndexPath(home);
+    const userCanonicalRoot = join18(home, ".agents", "skills");
+    const userSkillIds = await listInstalledSkillIds(userVaultRoot, userCanonicalRoot);
+    if (input2.scope === "user") {
+      if (!userSkillIds.includes(input2.skillId)) {
+        throw new Error(`skill-not-found: user:${input2.skillId}`);
+      }
+    } else if (ws) {
+      const { wsSkillIds } = await this.resolveWorkspaceSkillIds(ws, userSkillIds);
+      if (!wsSkillIds.includes(input2.skillId)) {
+        throw new Error(`skill-not-found: workspace:${input2.skillId}`);
+      }
+    }
+    const userState = await readSkillEnablementState({
+      runtime: {
+        scope: ws ? "workspace" : "global",
+        homeDirectory: home,
+        ...ws ? { workspaceDirectory: ws } : {},
+        vaultRoot: userVaultRoot,
+        indexPath: userIndexPath,
+        stateDirectory: join18(ws ?? home, ".pmstudio", "state"),
+        detectedProviders: [],
+        fileIO: this.fileIO
+      },
+      includeAgents: false
+    });
+    const resolutionMap = resolveEffectiveSkills({
+      installed: [input2.skillId],
+      userDefaults: userState.userDefaults,
+      projectOverrides: ws ? userState.projectOverrides : {},
+      userAgentOverrides: userState.userAgentOverrides,
+      projectAgentOverrides: ws ? userState.projectAgentOverrides : {},
+      scope: ws ? "workspace" : "global",
+      includeAgents: true
+    });
+    const resolution = resolutionMap.get(input2.skillId);
+    if (!resolution) {
+      throw new Error(`skill-not-found: ${input2.scope}:${input2.skillId}`);
+    }
+    return {
+      rowKey: `${input2.scope}:${input2.skillId}`,
+      agents: resolution.agents ?? {},
+      agentDetails: resolution.agentDetails ?? {}
     };
   }
   async rescanPlugins() {
@@ -24180,7 +24265,7 @@ var SkillsWorkerService = class {
       ...this.options.etcCodexSkillsRoot ? { etcCodexSkillsRoot: this.options.etcCodexSkillsRoot } : {}
     });
     return {
-      pluginSkills: result.skills,
+      pluginSkills: truncatePluginDescriptions(result.skills),
       pluginScanError: null
     };
   }
@@ -24328,7 +24413,7 @@ var SkillsWorkerService = class {
       includeAdoptable: false
     });
     const requestedSet = new Set(input2.skillIds);
-    const updatedSkills = refreshed.managedSkills.filter((item) => requestedSet.has(item.id));
+    const updatedSkills = refreshed.managedSkills.filter((item) => requestedSet.has(item.id)).map(omitAgentMatrix);
     const hasIssues = conflicts.length > 0 || readonlyBlocked.length > 0 || failed.length > 0;
     if (failed.length > 0 && updatedSkills.length === 0) {
       throw new Error(failed.map((f) => `${f.skillId}: ${f.error}`).join("; "));
@@ -24707,6 +24792,12 @@ function activate(orca) {
   );
   disposables.push(
     orca.panels.handle(SKILL_BRIDGE_METHODS.panelSnapshot, () => service.getQuickPanelSnapshot())
+  );
+  disposables.push(
+    orca.panels.handle(SKILL_BRIDGE_METHODS.skillAgentMatrix, async (rawInput) => {
+      const parsed = SkillAgentMatrixInputSchema.parse(rawInput);
+      return service.getSkillAgentMatrix(parsed);
+    })
   );
   disposables.push(
     orca.panels.handle(SKILL_BRIDGE_METHODS.pluginsRescan, () => service.rescanPlugins())

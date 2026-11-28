@@ -7,6 +7,7 @@ import type { CopyModePlacementState } from './skill-vault-contract';
 export declare const SKILL_BRIDGE_METHODS: {
     readonly workbenchSnapshot: 'skills.workbench.snapshot';
     readonly panelSnapshot: 'skills.panel.snapshot';
+    readonly skillAgentMatrix: 'skills.skill.agentMatrix';
     readonly enablementMutate: 'skills.enablement.mutate';
     readonly pluginsRescan: 'skills.plugins.rescan';
     readonly vaultAdopt: 'skills.vault.adopt';
@@ -56,8 +57,8 @@ export type ManagedSkillViewItem = {
     origin: SkillEnablementOrigin;
     enabledAgentCount: number;
     supportedAgentCount: number;
-    agents: Partial<Record<AgentId, boolean>>;
-    agentDetails: Partial<Record<AgentId, EffectiveAgentSkillState>>;
+    agents?: Partial<Record<AgentId, boolean>>;
+    agentDetails?: Partial<Record<AgentId, EffectiveAgentSkillState>>;
 };
 export type AdoptableSkillViewItem = {
     rowKey: string;
@@ -87,6 +88,19 @@ export type QuickPanelSnapshotOutput = {
     pluginSkillCount: number;
     adoptableCount: number;
     generatedAt: number;
+};
+export declare const SkillAgentMatrixInputSchema: z.ZodObject<{
+    skillId: z.ZodString;
+    scope: z.ZodEnum<{
+        user: "user";
+        workspace: "workspace";
+    }>;
+}, z.core.$strict>;
+export type SkillAgentMatrixInput = z.infer<typeof SkillAgentMatrixInputSchema>;
+export type SkillAgentMatrixOutput = {
+    rowKey: string;
+    agents: Partial<Record<AgentId, boolean>>;
+    agentDetails: Partial<Record<AgentId, EffectiveAgentSkillState>>;
 };
 export declare const SkillMutateInputSchema: z.ZodObject<{
     kind: z.ZodEnum<{

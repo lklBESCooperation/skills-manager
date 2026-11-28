@@ -19863,6 +19863,7 @@ var TUI_AGENT_SET = new Set(TUI_AGENTS);
 var SKILL_BRIDGE_METHODS = {
   workbenchSnapshot: "skills.workbench.snapshot",
   panelSnapshot: "skills.panel.snapshot",
+  skillAgentMatrix: "skills.skill.agentMatrix",
   enablementMutate: "skills.enablement.mutate",
   pluginsRescan: "skills.plugins.rescan",
   vaultAdopt: "skills.vault.adopt",
@@ -19881,6 +19882,10 @@ var SKILL_BRIDGE_EVENTS = {
   skillsChanged: "skills.changed",
   contextChanged: "skills.contextChanged"
 };
+var SkillAgentMatrixInputSchema = external_exports.object({
+  skillId: external_exports.string().min(1).max(128),
+  scope: external_exports.enum(["user", "workspace"])
+}).strict();
 var AgentIdSchema = external_exports.enum(TUI_AGENTS);
 var SkillMutateInputSchema = external_exports.object({
   kind: external_exports.enum(["enable", "disable", "inherit"]),
@@ -21825,7 +21830,7 @@ function mountSkillsWorkbench() {
     const isMatrixOpen = expandedAgents.has(item.rowKey);
     const isDescExpanded = expandedDescriptions.has(item.rowKey);
     const matrixFilter = matrixFilterByRow.get(item.rowKey) ?? "all";
-    const enabledAgents = Object.entries(item.agents).filter(([, enabled]) => Boolean(enabled)).map(([agentId]) => agentMap.get(agentId)?.displayName ?? agentId);
+    const enabledAgents = Object.entries(item.agents ?? {}).filter(([, enabled]) => Boolean(enabled)).map(([agentId]) => agentMap.get(agentId)?.displayName ?? agentId);
     const previewAgents = enabledAgents.slice(0, 4);
     const extraAgentsCount = Math.max(0, enabledAgents.length - previewAgents.length);
     const showInheritBtn = snapshot?.activeWorkspace.isLocalDirectoryAvailable && targetWriteScope === "project" && item.origin === "project";
@@ -21970,16 +21975,16 @@ function mountSkillsWorkbench() {
     );
     if (isMatrixOpen && snapshot) {
       const filteredAgents = snapshot.agentRegistry.filter((agent) => {
-        const detail = item.agentDetails[agent.id];
+        const detail = item.agentDetails?.[agent.id];
         const isUnsupported = agent.capability === "unsupported" || detail?.origin === "unsupported";
-        const isEnabled = Boolean(item.agents[agent.id]);
+        const isEnabled = Boolean(item.agents?.[agent.id]);
         if (matrixFilter === "enabled") return !isUnsupported && isEnabled;
         if (matrixFilter === "disabled") return !isUnsupported && !isEnabled;
         if (matrixFilter === "unsupported") return isUnsupported;
         return true;
       });
       const originLabel = (agent) => {
-        const detail = item.agentDetails[agent.id];
+        const detail = item.agentDetails?.[agent.id];
         if (!detail || detail.origin === "unsupported" || agent.capability === "unsupported") {
           return "\u6682\u4E0D\u652F\u6301";
         }
@@ -22029,9 +22034,9 @@ function mountSkillsWorkbench() {
             "div",
             { className: "sm-matrix-grid" },
             ...filteredAgents.map((agent) => {
-              const detail = item.agentDetails[agent.id];
+              const detail = item.agentDetails?.[agent.id];
               const unsupported = agent.capability === "unsupported" || detail?.origin === "unsupported";
-              const on = !unsupported && Boolean(item.agents[agent.id]);
+              const on = !unsupported && Boolean(item.agents?.[agent.id]);
               return el(
                 "div",
                 { className: "sm-agent-cell" },

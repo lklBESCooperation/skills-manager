@@ -317,7 +317,7 @@ export function mountSkillsWorkbench(): void {
     const isDescExpanded = expandedDescriptions.has(item.rowKey)
     const matrixFilter = matrixFilterByRow.get(item.rowKey) ?? 'all'
 
-    const enabledAgents = Object.entries(item.agents)
+    const enabledAgents = Object.entries(item.agents ?? {})
       .filter(([, enabled]) => Boolean(enabled))
       .map(([agentId]) => agentMap.get(agentId)?.displayName ?? agentId)
 
@@ -484,9 +484,9 @@ export function mountSkillsWorkbench(): void {
 
     if (isMatrixOpen && snapshot) {
       const filteredAgents = snapshot.agentRegistry.filter((agent) => {
-        const detail = item.agentDetails[agent.id]
+        const detail = item.agentDetails?.[agent.id]
         const isUnsupported = agent.capability === 'unsupported' || detail?.origin === 'unsupported'
-        const isEnabled = Boolean(item.agents[agent.id])
+        const isEnabled = Boolean(item.agents?.[agent.id])
         if (matrixFilter === 'enabled') return !isUnsupported && isEnabled
         if (matrixFilter === 'disabled') return !isUnsupported && !isEnabled
         if (matrixFilter === 'unsupported') return isUnsupported
@@ -494,7 +494,7 @@ export function mountSkillsWorkbench(): void {
       })
 
       const originLabel = (agent: AgentRegistrySummaryItem): string => {
-        const detail = item.agentDetails[agent.id]
+        const detail = item.agentDetails?.[agent.id]
         if (!detail || detail.origin === 'unsupported' || agent.capability === 'unsupported') {
           return '暂不支持'
         }
@@ -553,10 +553,10 @@ export function mountSkillsWorkbench(): void {
             'div',
             { className: 'sm-matrix-grid' },
             ...filteredAgents.map((agent) => {
-              const detail = item.agentDetails[agent.id]
+              const detail = item.agentDetails?.[agent.id]
               const unsupported =
                 agent.capability === 'unsupported' || detail?.origin === 'unsupported'
-              const on = !unsupported && Boolean(item.agents[agent.id])
+              const on = !unsupported && Boolean(item.agents?.[agent.id])
               return el(
                 'div',
                 { className: 'sm-agent-cell' },
