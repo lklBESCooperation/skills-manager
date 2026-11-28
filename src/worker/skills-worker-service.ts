@@ -1,5 +1,5 @@
-import { lstat, readdir, readFile, realpath, stat } from 'node:fs/promises'
-import { basename, join, resolve } from 'node:path'
+import { lstat, readdir, readFile, realpath, stat, unlink } from 'node:fs/promises'
+import { basename, dirname, join, resolve } from 'node:path'
 import { AGENT_SKILL_DESCRIPTORS } from '../contracts/agent-skill-registry'
 import type { PluginSkillRecord } from '../contracts/plugin-skill-contract'
 import type { SkillAuditReport } from '../contracts/skill-audit-contract'
@@ -18,6 +18,8 @@ import type {
 import type {
   AdoptableSkillViewItem,
   AgentRegistrySummaryItem,
+  AuditFixInput,
+  AuditFixOutput,
   ManagedSkillSourceKind,
   ManagedSkillViewItem,
   PackApplyOutput,
@@ -31,6 +33,7 @@ import type {
   SkillAdoptOutput,
   SkillAgentMatrixInput,
   SkillAgentMatrixOutput,
+  SkillGroupKind,
   SkillMutateConflictItem,
   SkillMutateInput,
   SkillMutateOutput,
@@ -130,14 +133,253 @@ function isLocalHostId(hostId: string | null | undefined): boolean {
   return hostId === null || hostId === undefined || hostId === 'local'
 }
 
-function buildAgentRegistrySummary(): AgentRegistrySummaryItem[] {
+function buildAgentRegistrySummary(
+  detectedIds: ReadonlySet<AgentId> = new Set(),
+  enabledIds: ReadonlySet<AgentId> = new Set()
+): AgentRegistrySummaryItem[] {
   return AGENT_SKILL_DESCRIPTORS.map((descriptor) => ({
     id: descriptor.id,
     displayName: descriptor.displayName,
     capability: descriptor.capability,
     readsCanonical: descriptor.readsCanonical.global || descriptor.readsCanonical.workspace,
-    ...(descriptor.delegatesTo ? { delegatesTo: descriptor.delegatesTo } : {})
+    ...(descriptor.delegatesTo ? { delegatesTo: descriptor.delegatesTo } : {}),
+    detected: detectedIds.has(descriptor.id),
+    enabled: enabledIds.has(descriptor.id)
   }))
+}
+
+async function isDirectoryPath(targetPath: string): Promise<boolean> {
+  return stat(targetPath)
+    .then((s) => s.isDirectory())
+    .catch(() => false)
+}
+
+async function detectInstalledAgentIds(
+  homeDirectory: string,
+  workspaceDirectory?: string
+): Promise<Set<AgentId>> {
+  const detected = new Set<AgentId>()
+  await Promise.all(
+    AGENT_SKILL_DESCRIPTORS.map(async (descriptor) => {
+      if (descriptor.capability === 'unsupported' || descriptor.capability === 'delegate') {
+        return
+      }
+      const globalDirs: string[] = []
+      if (descriptor.installTargets.globalSegments) {
+        globalDirs.push(join(homeDirectory, ...descriptor.installTargets.globalSegments))
+      }
+      for (const segs of descriptor.discoveryOnlyRoots?.globalSegments ?? []) {
+        globalDirs.push(join(homeDirectory, ...segs))
+      }
+      if (descriptor.id === 'pi') {
+        globalDirs.push(join(homeDirectory, '.pi', 'agent'), join(homeDirectory, '.pi'))
+      }
+
+      const workspaceDirs: string[] = []
+      if (workspaceDirectory) {
+        if (descriptor.installTargets.workspaceSegments) {
+          workspaceDirs.push(join(workspaceDirectory, ...descriptor.installTargets.workspaceSegments))
+        }
+        for (const segs of descriptor.discoveryOnlyRoots?.workspaceSegments ?? []) {
+          workspaceDirs.push(join(workspaceDirectory, ...segs))
+        }
+        if (descriptor.id === 'pi') {
+          workspaceDirs.push(join(workspaceDirectory, '.pi', 'skills'), join(workspaceDirectory, '.pi'))
+        }
+      }
+
+      for (const dir of new Set([...globalDirs, ...workspaceDirs])) {
+        if (await isDirectoryPath(dir)) {
+          detected.add(descriptor.id)
+          return
+        }
+      }
+    })
+  )
+  return detected
+}
+
+function isPathInsideRoot(candidate: string, root: string): boolean {
+  const normCandidate = resolve(candidate).replace(/\\/g, '/')
+  const normRoot = resolve(root).replace(/\\/g, '/')
+  const rootPrefix = normRoot.endsWith('/') ? normRoot : `${normRoot}/`
+  if (process.platform === 'win32') {
+    const lowerC = normCandidate.toLocaleLowerCase('en-US')
+    const lowerR = normRoot.toLocaleLowerCase('en-US')
+    const lowerP = rootPrefix.toLocaleLowerCase('en-US')
+    return lowerC === lowerR || lowerC.startsWith(lowerP)
+  }
+  return normCandidate === normRoot || normCandidate.startsWith(rootPrefix)
+}
+
+function extractOriginUrlFromGitConfig(content: string): string | null {
+  let inOriginSection = false
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#') || line.startsWith(';')) {
+      continue
+    }
+    if (line.startsWith('[')) {
+      inOriginSection = /^\[remote\s+"origin"\]$/i.test(line)
+      continue
+    }
+    if (inOriginSection) {
+      const match = /^url\s*=\s*(.+)$/.exec(line)
+      if (match?.[1]) {
+        return match[1].trim()
+      }
+    }
+  }
+  return null
+}
+
+function parseGitRemoteName(remoteUrl: string): string | null {
+  const trimmed = remoteUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '')
+  if (!trimmed) {
+    return null
+  }
+  const colonIdx = trimmed.lastIndexOf(':')
+  const slashIdx = trimmed.lastIndexOf('/')
+  const sepIdx = Math.max(colonIdx, slashIdx)
+  if (sepIdx >= 0 && sepIdx < trimmed.length - 1) {
+    const name = trimmed.slice(sepIdx + 1).trim()
+    return name || null
+  }
+  return trimmed
+}
+
+type SkillGroupMetadata = {
+  groupKind: SkillGroupKind
+  groupKey: string
+  groupLabel: string
+}
+
+function createSkillGroupResolver() {
+  const gitRepoCache = new Map<string, Promise<{ root: string; label: string } | null>>()
+
+  const readRepoLabel = async (repoRoot: string): Promise<string> => {
+    const gitMarker = join(repoRoot, '.git')
+    const markerStat = await lstat(gitMarker).catch(() => null)
+    let configPath: string | null = null
+    if (markerStat?.isDirectory()) {
+      configPath = join(gitMarker, 'config')
+    } else if (markerStat?.isFile()) {
+      const markerText = await readFile(gitMarker, 'utf8').catch(() => '')
+      const match = /^gitdir:\s*(.+)$/im.exec(markerText)
+      if (match?.[1]) {
+        const gitDir = resolve(repoRoot, match[1].trim())
+        const commonDirText = await readFile(join(gitDir, 'commondir'), 'utf8').catch(() => null)
+        const baseGitDir = commonDirText ? resolve(gitDir, commonDirText.trim()) : gitDir
+        configPath = join(baseGitDir, 'config')
+      }
+    }
+    if (configPath) {
+      const configText = await readFile(configPath, 'utf8').catch(() => null)
+      if (configText) {
+        const originUrl = extractOriginUrlFromGitConfig(configText)
+        const remoteName = originUrl ? parseGitRemoteName(originUrl) : null
+        if (remoteName) {
+          return remoteName
+        }
+      }
+    }
+    return basename(repoRoot) || repoRoot
+  }
+
+  const findGitRepo = (dir: string): Promise<{ root: string; label: string } | null> => {
+    const cached = gitRepoCache.get(dir)
+    if (cached) {
+      return cached
+    }
+    const promise = (async () => {
+      const hasGit = await lstat(join(dir, '.git'))
+        .then(() => true)
+        .catch(() => false)
+      if (hasGit) {
+        const realRepoRoot = await realpath(dir).catch(() => resolve(dir))
+        const label = await readRepoLabel(realRepoRoot)
+        return { root: realRepoRoot, label }
+      }
+      const parent = dirname(dir)
+      if (parent === dir) {
+        return null
+      }
+      return findGitRepo(parent)
+    })()
+    gitRepoCache.set(dir, promise)
+    return promise
+  }
+
+  const resolveFromDir = async (resolvedDir: string): Promise<SkillGroupMetadata> => {
+    const repo = await findGitRepo(resolvedDir)
+    if (repo) {
+      return {
+        groupKind: 'repo',
+        groupKey: `repo:${repo.root}`,
+        groupLabel: repo.label
+      }
+    }
+    const parentDir = dirname(resolvedDir)
+    return {
+      groupKind: 'parent-dir',
+      groupKey: `dir:${parentDir}`,
+      groupLabel: parentDir
+    }
+  }
+
+  return {
+    async resolveForManaged(params: {
+      id: string
+      vaultRoot: string
+      canonicalRoot: string
+      originPath?: string | null
+    }): Promise<SkillGroupMetadata> {
+      const vaultDir = join(params.vaultRoot, params.id)
+      const realVaultRoot = await realpath(params.vaultRoot).catch(() => resolve(params.vaultRoot))
+      const vaultStat = await lstat(vaultDir).catch(() => null)
+      if (vaultStat?.isSymbolicLink()) {
+        const realVaultTarget = await realpath(vaultDir).catch(() => null)
+        if (realVaultTarget && !isPathInsideRoot(realVaultTarget, realVaultRoot)) {
+          return resolveFromDir(realVaultTarget)
+        }
+      }
+
+      const originPath = params.originPath
+      if (originPath) {
+        const originStat = await lstat(originPath).catch(() => null)
+        if (originStat?.isSymbolicLink()) {
+          const realOrigin = await realpath(originPath).catch(() => null)
+          if (realOrigin && !isPathInsideRoot(realOrigin, realVaultRoot)) {
+            return resolveFromDir(realOrigin)
+          }
+        }
+        const realOriginParent = await realpath(dirname(originPath)).catch(() =>
+          resolve(dirname(originPath))
+        )
+        return resolveFromDir(join(realOriginParent, basename(originPath)))
+      }
+
+      if (vaultStat) {
+        const realVaultDir = await realpath(vaultDir).catch(() => resolve(vaultDir))
+        return resolveFromDir(realVaultDir)
+      }
+
+      const canonicalDir = join(params.canonicalRoot, params.id)
+      const realCanonical = await realpath(canonicalDir).catch(async () => {
+        const parent = await realpath(dirname(canonicalDir)).catch(() => resolve(dirname(canonicalDir)))
+        return join(parent, basename(canonicalDir))
+      })
+      return resolveFromDir(realCanonical)
+    },
+
+    async resolveForAdoptable(originPath: string): Promise<SkillGroupMetadata> {
+      const realOrigin = await realpath(originPath).catch(async () => {
+        const parent = await realpath(dirname(originPath)).catch(() => resolve(dirname(originPath)))
+        return join(parent, basename(originPath))
+      })
+      return resolveFromDir(realOrigin)
+    }
+  }
 }
 
 async function readSkillMdSummary(
@@ -244,7 +486,6 @@ async function collectCandidatePathsForScope(
 export class SkillsWorkerService {
   private readonly fileIO = createLocalSkillEnablementFileIO()
   private readonly coordinator: BatchCoordinator
-  private readonly agentRegistry: AgentRegistrySummaryItem[] = buildAgentRegistrySummary()
 
   constructor(private readonly options: SkillsWorkerServiceOptions) {
     this.coordinator = options.batchCoordinator ?? new BatchCoordinator()
@@ -364,6 +605,7 @@ export class SkillsWorkerService {
   }): Promise<{
     managedSkills: ManagedSkillViewItem[]
     adoptableSkills: AdoptableSkillViewItem[]
+    explicitlyEnabledAgents: Set<AgentId>
   }> {
     const home = this.options.homeDirectory
     const ws = input.workspaceDirectory
@@ -435,6 +677,18 @@ export class SkillsWorkerService {
     const supportedDescriptors = AGENT_SKILL_DESCRIPTORS.filter(
       (descriptor) => descriptor.capability !== 'unsupported'
     )
+    const groupResolver = createSkillGroupResolver()
+
+    const explicitlyEnabledAgents = new Set<AgentId>()
+    for (const overrides of [userState.userAgentOverrides, userState.projectAgentOverrides]) {
+      for (const agentMap of Object.values(overrides ?? {})) {
+        for (const [agentId, enabled] of Object.entries(agentMap ?? {})) {
+          if (enabled === true) {
+            explicitlyEnabledAgents.add(agentId as AgentId)
+          }
+        }
+      }
+    }
 
     const buildViewItems = async (params: {
       ids: readonly string[]
@@ -471,6 +725,13 @@ export class SkillsWorkerService {
             ? 'installed'
             : 'canonical-unindexed'
 
+        const groupMeta = await groupResolver.resolveForManaged({
+          id,
+          vaultRoot: params.vaultRoot,
+          canonicalRoot: params.canonicalRoot,
+          originPath: entry?.originPath ?? null
+        })
+
         const agents = resolution.agents ?? {}
         const agentDetails = resolution.agentDetails ?? {}
         let enabledAgentCount = 0
@@ -494,6 +755,7 @@ export class SkillsWorkerService {
           description: truncateDescription(description),
           sourceKind,
           scope: params.scope,
+          ...groupMeta,
           tags: entry?.tags ?? [],
           author: entry?.author ?? null,
           copyMode: Boolean(entry?.copyMode),
@@ -537,16 +799,36 @@ export class SkillsWorkerService {
 
     const adoptableSkills: AdoptableSkillViewItem[] = []
     if (input.includeAdoptable) {
+      const vaultedUserIds = new Set<string>([
+        ...userVaultIds,
+        ...(userIndex?.entries.map((entry) => entry.id) ?? [])
+      ])
+      const vaultedWsIds = new Set<string>([
+        ...wsVaultIds,
+        ...(wsIndex?.entries.map((entry) => entry.id) ?? [])
+      ])
+
       const scanAndMap = async (
         scope: SkillScopeKind,
         baseDir: string,
         vaultRoot: string,
         index: SkillVaultIndex | null
       ): Promise<void> => {
-        const candidatePaths = await collectCandidatePathsForScope(
+        const rawCandidatePaths = await collectCandidatePathsForScope(
           scope === 'user' ? 'global' : 'workspace',
           baseDir
         )
+        const candidatePaths: string[] = []
+        for (const candidatePath of rawCandidatePaths) {
+          if (
+            scope === 'workspace' &&
+            ((await isSymlinkIntoRoot(candidatePath, userVaultRoot)) ||
+              (await isSymlinkIntoRoot(candidatePath, userCanonicalRoot)))
+          ) {
+            continue
+          }
+          candidatePaths.push(candidatePath)
+        }
         const plan: SkillVaultScanPlan = await scanSkillVault({
           homeDirectory: home,
           vaultRoot,
@@ -554,17 +836,30 @@ export class SkillsWorkerService {
           index,
           readonlyRoots: input.readonlyRoots
         })
+        const scopeVaultedIds = scope === 'user' ? vaultedUserIds : vaultedWsIds
         for (const item of plan.items) {
           if (item.disposition !== 'adoptable' && item.disposition !== 'conflict') {
             continue
           }
-          const summary = await readSkillMdSummary([item.originPath])
+          if (item.disposition === 'adoptable') {
+            if (scopeVaultedIds.has(item.id)) {
+              continue
+            }
+            if (scope === 'workspace' && vaultedUserIds.has(item.id)) {
+              continue
+            }
+          }
+          const [summary, groupMeta] = await Promise.all([
+            readSkillMdSummary([item.originPath]),
+            groupResolver.resolveForAdoptable(item.originPath)
+          ])
           adoptableSkills.push({
             rowKey: `${scope}:${item.id}`,
             id: item.id,
             name: summary.name ?? item.id,
             description: truncateDescription(summary.description),
             scope,
+            ...groupMeta,
             disposition: item.disposition,
             digest: item.digest,
             originPath: item.originPath,
@@ -583,7 +878,7 @@ export class SkillsWorkerService {
       )
     }
 
-    return { managedSkills, adoptableSkills }
+    return { managedSkills, adoptableSkills, explicitlyEnabledAgents }
   }
 
   async getWorkbenchSnapshot(): Promise<WorkbenchSnapshotOutput> {
@@ -591,12 +886,17 @@ export class SkillsWorkerService {
     const { pluginSkills, readonlyRoots, pluginScanError } = await this.scanPluginsSafe(
       activeWorkspace.workspaceDirectory
     )
-    const { managedSkills, adoptableSkills } = await this.collectManagedAndAdoptable({
-      workspaceDirectory: activeWorkspace.workspaceDirectory,
-      readonlyRoots,
-      includeAgents: true,
-      includeAdoptable: true
-    })
+    const [{ managedSkills, adoptableSkills, explicitlyEnabledAgents }, detectedIds] =
+      await Promise.all([
+        this.collectManagedAndAdoptable({
+          workspaceDirectory: activeWorkspace.workspaceDirectory,
+          readonlyRoots,
+          includeAgents: true,
+          includeAdoptable: true
+        }),
+        detectInstalledAgentIds(this.options.homeDirectory, activeWorkspace.workspaceDirectory)
+      ])
+    const enabledIds = new Set<AgentId>([...detectedIds, ...explicitlyEnabledAgents])
 
     return {
       activeWorkspace: {
@@ -604,7 +904,7 @@ export class SkillsWorkerService {
         workspaceName: activeWorkspace.workspaceName,
         isLocalDirectoryAvailable: activeWorkspace.isLocalDirectoryAvailable
       },
-      agentRegistry: this.agentRegistry,
+      agentRegistry: buildAgentRegistrySummary(detectedIds, enabledIds),
       managedSkills: managedSkills.map(omitAgentMatrix),
       adoptableSkills,
       pluginSkills,
@@ -1300,5 +1600,70 @@ export class SkillsWorkerService {
       pluginSkills,
       readonlyRoots
     })
+  }
+
+  async fixAuditFindings(input: AuditFixInput = {}): Promise<AuditFixOutput> {
+    const activeWorkspace = await this.resolveActiveWorkspace()
+    const ws = activeWorkspace.workspaceDirectory
+    const { readonlyRoots } = await this.scanPluginsSafe(ws)
+    const initialReport = await this.runAudit(input.scope)
+    const allowedKinds = new Set(
+      input.kinds && input.kinds.length > 0
+        ? input.kinds
+        : (['orphan-symlink', 'readonly-plugin-exposure'] as const)
+    )
+    const requestedPaths = input.paths ? new Set(input.paths) : null
+
+    const fixedPaths: string[] = []
+    const skipped: { path: string; reason: string }[] = []
+
+    for (const finding of initialReport.findings) {
+      if (
+        finding.kind !== 'orphan-symlink' &&
+        finding.kind !== 'readonly-plugin-exposure'
+      ) {
+        continue
+      }
+      if (!allowedKinds.has(finding.kind)) {
+        continue
+      }
+      if (requestedPaths && !requestedPaths.has(finding.path)) {
+        continue
+      }
+      if (!finding.fixable) {
+        skipped.push({ path: finding.path, reason: 'not-auto-fixable' })
+        continue
+      }
+      const entryStat = await lstat(finding.path).catch(() => null)
+      if (!entryStat || !entryStat.isSymbolicLink()) {
+        skipped.push({ path: finding.path, reason: 'not-a-symlink' })
+        continue
+      }
+      if (finding.kind === 'orphan-symlink') {
+        const resolved = await stat(finding.path).catch(() => null)
+        if (resolved) {
+          skipped.push({ path: finding.path, reason: 'target-exists' })
+          continue
+        }
+      } else if (finding.kind === 'readonly-plugin-exposure') {
+        const isExposure = await isReadonlySkillTarget(finding.path, { readonlyRoots })
+        if (!isExposure) {
+          skipped.push({ path: finding.path, reason: 'not-readonly-exposure' })
+          continue
+        }
+      }
+      try {
+        await unlink(finding.path)
+        fixedPaths.push(finding.path)
+      } catch (error) {
+        skipped.push({
+          path: finding.path,
+          reason: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+
+    const report = await this.runAudit(input.scope)
+    return { fixedPaths, skipped, report }
   }
 }

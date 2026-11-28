@@ -8,6 +8,9 @@ const skill_path_containment_1 = require("../contracts/skill-path-containment");
 const readonly_root_fence_1 = require("../infra/readonly-root-fence");
 const skill_vault_scan_1 = require("../vault/skill-vault-scan");
 const staging_marker_1 = require("../vault/staging-marker");
+function quoteShellArg(value) {
+    return `"${value.replace(/(["\\$`])/g, '\\$1')}"`;
+}
 async function listDirectChildPaths(root) {
     const entries = await (0, promises_1.readdir)(root, { withFileTypes: true }).catch(() => []);
     return entries
@@ -77,7 +80,10 @@ async function auditSkillsHealth(input) {
                         path: childPath,
                         ...(agent ? { agent } : {}),
                         ...(rawTarget ? { targetPath: rawTarget } : {}),
-                        message: `Broken symlink in agent skill root${rawTarget ? ` (target: ${rawTarget})` : ''}`
+                        message: `Broken symlink in agent skill root${rawTarget ? ` (target: ${rawTarget})` : ''}`,
+                        suggestedCommand: `rm ${quoteShellArg(childPath)}`,
+                        actionHint: '清理失效的断链符号链接（或在对应位置恢复目标目录）',
+                        fixable: true
                     });
                     continue;
                 }
@@ -93,7 +99,10 @@ async function auditSkillsHealth(input) {
                         path: childPath,
                         ...(agent ? { agent } : {}),
                         ...(realTarget ? { targetPath: realTarget } : {}),
-                        message: 'Symlink in writable agent root resolves into a readonly plugin directory'
+                        message: 'Symlink in writable agent root resolves into a readonly plugin directory',
+                        suggestedCommand: `rm ${quoteShellArg(childPath)}`,
+                        actionHint: '移除指向只读插件目录的符号链接，避免误修改插件内置技能',
+                        fixable: true
                     });
                     continue;
                 }
@@ -109,13 +118,17 @@ async function auditSkillsHealth(input) {
                 const retiredRoot = (0, node_path_1.join)(input.homeDirectory, ...retiredSegs);
                 const children = await listDirectChildPaths(retiredRoot);
                 for (const childPath of children) {
+                    const skillId = childPath.split(/[/\\]/).at(-1) ?? childPath;
+                    const canonicalRoot = (0, node_path_1.join)(input.homeDirectory, '.agents', 'skills');
                     findings.push({
                         kind: 'retired-install-root',
                         severity: 'info',
-                        skillId: childPath.split(/[/\\]/).at(-1) ?? childPath,
+                        skillId,
                         path: childPath,
                         agent: descriptor.id,
-                        message: `Skill resides in retired root for ${descriptor.displayName}; migrate to canonical .agents/skills`
+                        message: `Skill resides in retired root for ${descriptor.displayName}; migrate to canonical .agents/skills`,
+                        suggestedCommand: `mkdir -p ${quoteShellArg(canonicalRoot)} && mv ${quoteShellArg(childPath)} ${quoteShellArg((0, node_path_1.join)(canonicalRoot, skillId))}`,
+                        actionHint: '将该技能迁移至共享目录 .agents/skills，再回到工作台执行纳管'
                     });
                 }
             }
@@ -132,23 +145,31 @@ async function auditSkillsHealth(input) {
     for (const item of scanPlan.items) {
         const candidateAgent = agentByCandidatePath.get(item.originPath);
         if (item.disposition === 'adoptable' && item.mergePaths.length > 0) {
+            const copyPaths = [item.originPath, ...item.mergePaths];
             findings.push({
                 kind: 'duplicate-same-digest',
                 severity: 'info',
                 skillId: item.id,
                 path: item.originPath,
                 ...(candidateAgent ? { agent: candidateAgent } : {}),
-                message: `${item.mergePaths.length + 1} identical copies found across agent roots`
+                message: `${item.mergePaths.length + 1} identical copies found across agent roots`,
+                suggestedCommand: `ls -ld ${copyPaths.map(quoteShellArg).join(' ')}`,
+                actionHint: '多个目录存在内容相同的副本，可在「已安装技能」页签执行纳管自动合并为链接'
             });
         }
         else if (item.disposition === 'conflict') {
+            const conflictCmd = item.conflicts.length >= 2
+                ? `diff -ru ${quoteShellArg(item.conflicts[0].path)} ${quoteShellArg(item.conflicts[1].path)}`
+                : `ls -ld ${quoteShellArg(item.originPath)}`;
             findings.push({
                 kind: 'digest-conflict',
                 severity: 'error',
                 skillId: item.id,
                 path: item.originPath,
                 ...(candidateAgent ? { agent: candidateAgent } : {}),
-                message: `${item.conflicts.length} conflicting variants with differing content digests`
+                message: `${item.conflicts.length} conflicting variants with differing content digests`,
+                suggestedCommand: conflictCmd,
+                actionHint: '同名技能在不同目录存在内容差异，请对比后保留所需版本并清理其余副本'
             });
         }
         else if (item.disposition === 'copy-drifted') {
@@ -158,7 +179,9 @@ async function auditSkillsHealth(input) {
                 skillId: item.id,
                 path: item.originPath,
                 ...(candidateAgent ? { agent: candidateAgent } : {}),
-                message: 'copyMode placement has local edits differing from Vault master'
+                message: 'copyMode placement has local edits differing from Vault master',
+                suggestedCommand: `diff -ru ${quoteShellArg((0, node_path_1.join)(input.vaultRoot, item.id))} ${quoteShellArg(item.originPath)}`,
+                actionHint: 'Copy 模式本地副本与 Vault 主版本存在差异，请对比后决定同步回 Vault 或重置副本'
             });
         }
         else if (item.disposition === 'copy-outdated') {
@@ -168,7 +191,9 @@ async function auditSkillsHealth(input) {
                 skillId: item.id,
                 path: item.originPath,
                 ...(candidateAgent ? { agent: candidateAgent } : {}),
-                message: 'copyMode placement is behind Vault master digest and can be refreshed'
+                message: 'copyMode placement is behind Vault master digest and can be refreshed',
+                suggestedCommand: `diff -ru ${quoteShellArg((0, node_path_1.join)(input.vaultRoot, item.id))} ${quoteShellArg(item.originPath)}`,
+                actionHint: 'Copy 模式本地副本版本落后于 Vault，可通过重新启用技能刷新同步'
             });
         }
     }
@@ -179,12 +204,20 @@ async function auditSkillsHealth(input) {
             readonlyRoots: input.readonlyRoots,
             semantics
         })) {
+            const vaultChildIsSymlink = await (0, promises_1.lstat)(vaultChild)
+                .then((s) => s.isSymbolicLink())
+                .catch(() => false);
             findings.push({
                 kind: 'readonly-plugin-exposure',
                 severity: 'error',
                 skillId: vaultChild.split(/[/\\]/).at(-1) ?? vaultChild,
                 path: vaultChild,
-                message: 'Vault entry links or resolves to a readonly plugin directory'
+                message: 'Vault entry links or resolves to a readonly plugin directory',
+                suggestedCommand: vaultChildIsSymlink
+                    ? `rm ${quoteShellArg(vaultChild)}`
+                    : `rm -rf ${quoteShellArg(vaultChild)}`,
+                actionHint: '移除指向只读插件目录的链接或副本，避免误修改插件内置技能',
+                ...(vaultChildIsSymlink ? { fixable: true } : {})
             });
         }
     }
@@ -197,7 +230,9 @@ async function auditSkillsHealth(input) {
                 skillId: pluginSkill.id,
                 path: pluginSkill.skillDirectoryPath,
                 ...(pluginSkill.agent ? { agent: pluginSkill.agent } : {}),
-                message: `Managed skill '${pluginSkill.id}' shares name with readonly plugin skill '${pluginSkill.pluginName}'`
+                message: `Managed skill '${pluginSkill.id}' shares name with readonly plugin skill '${pluginSkill.pluginName}'`,
+                suggestedCommand: `ls -ld ${quoteShellArg((0, node_path_1.join)(input.vaultRoot, pluginSkill.id))} ${quoteShellArg(pluginSkill.skillDirectoryPath)}`,
+                actionHint: '受管技能与只读插件内置技能同名，建议停用或重命名受管副本以避免覆盖冲突'
             });
         }
     }

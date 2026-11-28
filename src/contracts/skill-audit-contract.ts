@@ -20,6 +20,9 @@ export type SkillAuditFinding = {
   agent?: TuiAgent
   targetPath?: string
   message: string
+  suggestedCommand?: string
+  actionHint?: string
+  fixable?: boolean
 }
 
 export type SkillAuditSummary = {

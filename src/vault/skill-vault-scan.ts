@@ -1,5 +1,5 @@
 import { readlink, realpath, stat } from 'node:fs/promises'
-import { basename, join, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import {
   classifyCopyModePlacement,
   type CopyModePlacementState,
@@ -104,15 +104,25 @@ function isInsideVault(path: string, vaultRoot: string): boolean {
 
 async function linkResolvesInsideVault(candidatePath: string, vaultRoot: string): Promise<boolean> {
   // A managed placement is a link whose target resolves inside the vault root.
-  const isLink = await readlink(candidatePath)
-    .then(() => true)
-    .catch(() => false)
-  if (!isLink) {
+  const rawTarget = await readlink(candidatePath).catch(() => null)
+  if (rawTarget === null) {
     return false
   }
+  const targetExists = await stat(candidatePath)
+    .then(() => true)
+    .catch(() => false)
+  if (!targetExists) {
+    return false
+  }
+  const resolvedRoot = await realpath(vaultRoot).catch(() => resolve(vaultRoot))
   const resolved = await realpath(candidatePath).catch(() => null)
-  const resolvedRoot = await realpath(vaultRoot).catch(() => vaultRoot)
-  return resolved !== null && isInsideVault(resolved, resolvedRoot)
+  if (resolved !== null && isInsideVault(resolved, resolvedRoot)) {
+    return true
+  }
+  // Also check immediate link target so a vault entry that itself symlinks to an external repo counts as managed.
+  const realParent = await realpath(dirname(candidatePath)).catch(() => resolve(dirname(candidatePath)))
+  const immediateTarget = resolve(realParent, rawTarget)
+  return isInsideVault(immediateTarget, resolvedRoot)
 }
 
 /** Group candidates by directory name; each group's verdict is one plan row. */
@@ -239,6 +249,37 @@ export async function scanSkillVault(input: SkillVaultScanInput): Promise<SkillV
       continue
     }
     const sorted = [...digested].sort((left, right) => left.path.localeCompare(right.path))
+    const vaultEntryPath = join(input.vaultRoot, id)
+    const vaultEntryExists = await stat(vaultEntryPath)
+      .then((s) => s.isDirectory())
+      .catch(() => false)
+    if (vaultEntryExists) {
+      const vaultDigest =
+        indexById.get(id)?.digest ?? (await computeSkillVaultDigest(vaultEntryPath).catch(() => null))
+      if (vaultDigest !== null) {
+        if (sorted.every((candidate) => candidate.digest === vaultDigest)) {
+          items.push(managedItem(id, { ...sorted[0], path: vaultEntryPath }))
+          continue
+        }
+        items.push({
+          id,
+          disposition: 'conflict',
+          originPath: sorted[0].path,
+          digest: '',
+          sizeBytes: 0,
+          mtimeMs: sorted[0].mtimeMs,
+          mergePaths: [],
+          conflicts: sorted.map((candidate) => ({
+            id: candidate.id,
+            path: candidate.path,
+            digest: candidate.digest,
+            mtimeMs: candidate.mtimeMs,
+            sizeBytes: 0
+          }))
+        })
+        continue
+      }
+    }
     const distinctDigests = new Set(sorted.map((candidate) => candidate.digest))
     if (distinctDigests.size > 1) {
       items.push({

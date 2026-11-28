@@ -78,6 +78,16 @@ describe('auditSkillsHealth (read-only diagnostics)', () => {
     expect(report.summary.pluginCollisions).toBe(1)
     expect(report.summary.pluginSkillsTotal).toBe(1)
     expect(report.summary.pluginSkillsActive).toBe(1)
+    for (const finding of report.findings) {
+      expect(finding.suggestedCommand).toBeTruthy()
+      expect(finding.actionHint).toBeTruthy()
+      if (finding.kind === 'orphan-symlink' || finding.kind === 'readonly-plugin-exposure') {
+        expect(finding.fixable).toBe(true)
+      }
+    }
+    const orphan = report.findings.find((f) => f.kind === 'orphan-symlink')
+    expect(orphan?.suggestedCommand).toContain('rm ')
+    expect(orphan?.suggestedCommand).toContain('broken-skill')
     expect(report).toStrictEqual(JSON.parse(JSON.stringify(report)))
   })
 

@@ -6,7 +6,7 @@ var __export = (target, all) => {
 
 // src/worker/plugin-worker.ts
 import { homedir } from "node:os";
-import { dirname as dirname9, resolve as resolve10 } from "node:path";
+import { dirname as dirname11, resolve as resolve11 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/.pnpm/zod@4.6.7/node_modules/zod/v4/classic/external.js
@@ -5076,7 +5076,7 @@ var recursive = /* @__PURE__ */ new WeakMap();
 var NONE = 0;
 var ASSUMED = 1;
 var PROVEN = 2;
-function isRecursive(inst, stack, resolve11) {
+function isRecursive(inst, stack, resolve12) {
   const cached2 = recursive.get(inst);
   if (cached2 !== void 0)
     return cached2 ? PROVEN : NONE;
@@ -5086,7 +5086,7 @@ function isRecursive(inst, stack, resolve11) {
   let result = NONE;
   const check2 = (child) => {
     if (result !== PROVEN && child?._zod) {
-      const answer = isRecursive(child, stack, resolve11);
+      const answer = isRecursive(child, stack, resolve12);
       if (answer > result)
         result = answer;
     }
@@ -5097,7 +5097,7 @@ function isRecursive(inst, stack, resolve11) {
       const desc = Object.getOwnPropertyDescriptor(sh, key);
       if (spread && !desc.enumerable)
         continue;
-      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve11) : NONE;
+      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve12) : NONE;
       if (child > answer)
         answer = child;
     }
@@ -5161,7 +5161,7 @@ function isRecursive(inst, stack, resolve11) {
       break;
     // `$ZodLazy` caches its inner on the def, so a resolved edge is followed exactly
     case "lazy": {
-      const inner = def._cachedInner ?? (resolve11 ? inst._zod.innerType : void 0);
+      const inner = def._cachedInner ?? (resolve12 ? inst._zod.innerType : void 0);
       merge2(inner ? isRecursive(inner, stack, false) : ASSUMED);
       break;
     }
@@ -19885,7 +19885,8 @@ var SKILL_BRIDGE_METHODS = {
   packsRollback: "skills.packs.rollback",
   packsExport: "skills.packs.export",
   packsImport: "skills.packs.import",
-  auditRun: "skills.audit.run"
+  auditRun: "skills.audit.run",
+  auditFix: "skills.audit.fix"
 };
 var SKILL_BRIDGE_EVENTS = {
   skillsChanged: "skills.changed",
@@ -19938,10 +19939,15 @@ var PackImportInputSchema = external_exports.object({
   bundle: SkillPackExportBundleSchema,
   conflictStrategy: external_exports.enum(["overwrite", "rename", "reject"]).optional()
 }).strict();
+var AuditFixInputSchema = external_exports.object({
+  scope: external_exports.enum(["user", "project"]).optional(),
+  kinds: external_exports.array(external_exports.enum(["orphan-symlink", "readonly-plugin-exposure"])).optional(),
+  paths: external_exports.array(external_exports.string().min(1)).optional()
+}).strict();
 
 // src/worker/skills-worker-service.ts
-import { lstat as lstat7, readdir as readdir4, readFile as readFile7, realpath as realpath8, stat as stat8 } from "node:fs/promises";
-import { basename as basename5, join as join18, resolve as resolve9 } from "node:path";
+import { lstat as lstat7, readdir as readdir4, readFile as readFile7, realpath as realpath8, stat as stat8, unlink } from "node:fs/promises";
+import { basename as basename5, dirname as dirname10, join as join18, resolve as resolve10 } from "node:path";
 
 // src/contracts/agent-skill-registry.ts
 var CANONICAL_DEFAULT = { global: true, workspace: true };
@@ -20834,7 +20840,7 @@ async function isReadonlySkillTarget(targetPath, context = {}) {
 
 // src/vault/skill-vault-scan.ts
 import { readlink, realpath as realpath2, stat } from "node:fs/promises";
-import { basename, join as join6, sep as sep2 } from "node:path";
+import { basename, dirname as dirname4, join as join6, resolve as resolve4, sep as sep2 } from "node:path";
 
 // src/contracts/skill-vault-contract.ts
 var SKILL_VAULT_SCHEMA_VERSION = 1;
@@ -20917,7 +20923,7 @@ async function renameSkillPathWithWindowsRetry(source, target) {
         throw error62;
       }
       await new Promise(
-        (resolve11) => setTimeout(resolve11, WINDOWS_RENAME_RETRY_DELAYS_MS[attempt])
+        (resolve12) => setTimeout(resolve12, WINDOWS_RENAME_RETRY_DELAYS_MS[attempt])
       );
     }
   }
@@ -21275,13 +21281,22 @@ function isInsideVault(path, vaultRoot) {
   return normalizedPath2 === normalizedRoot || normalizedPath2.startsWith(`${normalizedRoot}${process.platform === "win32" ? "\\" : sep2}`);
 }
 async function linkResolvesInsideVault(candidatePath, vaultRoot) {
-  const isLink = await readlink(candidatePath).then(() => true).catch(() => false);
-  if (!isLink) {
+  const rawTarget = await readlink(candidatePath).catch(() => null);
+  if (rawTarget === null) {
     return false;
   }
+  const targetExists = await stat(candidatePath).then(() => true).catch(() => false);
+  if (!targetExists) {
+    return false;
+  }
+  const resolvedRoot = await realpath2(vaultRoot).catch(() => resolve4(vaultRoot));
   const resolved = await realpath2(candidatePath).catch(() => null);
-  const resolvedRoot = await realpath2(vaultRoot).catch(() => vaultRoot);
-  return resolved !== null && isInsideVault(resolved, resolvedRoot);
+  if (resolved !== null && isInsideVault(resolved, resolvedRoot)) {
+    return true;
+  }
+  const realParent = await realpath2(dirname4(candidatePath)).catch(() => resolve4(dirname4(candidatePath)));
+  const immediateTarget = resolve4(realParent, rawTarget);
+  return isInsideVault(immediateTarget, resolvedRoot);
 }
 async function scanSkillVault(input2) {
   const semantics = nativeSkillPathSemantics();
@@ -21392,6 +21407,34 @@ async function scanSkillVault(input2) {
       continue;
     }
     const sorted = [...digested].sort((left, right) => left.path.localeCompare(right.path));
+    const vaultEntryPath = join6(input2.vaultRoot, id);
+    const vaultEntryExists = await stat(vaultEntryPath).then((s) => s.isDirectory()).catch(() => false);
+    if (vaultEntryExists) {
+      const vaultDigest = indexById.get(id)?.digest ?? await computeSkillVaultDigest(vaultEntryPath).catch(() => null);
+      if (vaultDigest !== null) {
+        if (sorted.every((candidate) => candidate.digest === vaultDigest)) {
+          items.push(managedItem(id, { ...sorted[0], path: vaultEntryPath }));
+          continue;
+        }
+        items.push({
+          id,
+          disposition: "conflict",
+          originPath: sorted[0].path,
+          digest: "",
+          sizeBytes: 0,
+          mtimeMs: sorted[0].mtimeMs,
+          mergePaths: [],
+          conflicts: sorted.map((candidate) => ({
+            id: candidate.id,
+            path: candidate.path,
+            digest: candidate.digest,
+            mtimeMs: candidate.mtimeMs,
+            sizeBytes: 0
+          }))
+        });
+        continue;
+      }
+    }
     const distinctDigests = new Set(sorted.map((candidate) => candidate.digest));
     if (distinctDigests.size > 1) {
       items.push({
@@ -21474,6 +21517,9 @@ function adoptableSkillVaultItems(plan) {
 }
 
 // src/audit/skill-audit-service.ts
+function quoteShellArg(value) {
+  return `"${value.replace(/(["\\$`])/g, "\\$1")}"`;
+}
 async function listDirectChildPaths(root) {
   const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
   return entries.filter((entry) => !entry.name.startsWith(".") && !isSkillStagingEntryName(entry.name)).map((entry) => join7(root, entry.name));
@@ -21533,7 +21579,10 @@ async function auditSkillsHealth(input2) {
             path: childPath,
             ...agent ? { agent } : {},
             ...rawTarget ? { targetPath: rawTarget } : {},
-            message: `Broken symlink in agent skill root${rawTarget ? ` (target: ${rawTarget})` : ""}`
+            message: `Broken symlink in agent skill root${rawTarget ? ` (target: ${rawTarget})` : ""}`,
+            suggestedCommand: `rm ${quoteShellArg(childPath)}`,
+            actionHint: "\u6E05\u7406\u5931\u6548\u7684\u65AD\u94FE\u7B26\u53F7\u94FE\u63A5\uFF08\u6216\u5728\u5BF9\u5E94\u4F4D\u7F6E\u6062\u590D\u76EE\u6807\u76EE\u5F55\uFF09",
+            fixable: true
           });
           continue;
         }
@@ -21549,7 +21598,10 @@ async function auditSkillsHealth(input2) {
             path: childPath,
             ...agent ? { agent } : {},
             ...realTarget ? { targetPath: realTarget } : {},
-            message: "Symlink in writable agent root resolves into a readonly plugin directory"
+            message: "Symlink in writable agent root resolves into a readonly plugin directory",
+            suggestedCommand: `rm ${quoteShellArg(childPath)}`,
+            actionHint: "\u79FB\u9664\u6307\u5411\u53EA\u8BFB\u63D2\u4EF6\u76EE\u5F55\u7684\u7B26\u53F7\u94FE\u63A5\uFF0C\u907F\u514D\u8BEF\u4FEE\u6539\u63D2\u4EF6\u5185\u7F6E\u6280\u80FD",
+            fixable: true
           });
           continue;
         }
@@ -21564,13 +21616,17 @@ async function auditSkillsHealth(input2) {
         const retiredRoot = join7(input2.homeDirectory, ...retiredSegs);
         const children = await listDirectChildPaths(retiredRoot);
         for (const childPath of children) {
+          const skillId = childPath.split(/[/\\]/).at(-1) ?? childPath;
+          const canonicalRoot = join7(input2.homeDirectory, ".agents", "skills");
           findings.push({
             kind: "retired-install-root",
             severity: "info",
-            skillId: childPath.split(/[/\\]/).at(-1) ?? childPath,
+            skillId,
             path: childPath,
             agent: descriptor.id,
-            message: `Skill resides in retired root for ${descriptor.displayName}; migrate to canonical .agents/skills`
+            message: `Skill resides in retired root for ${descriptor.displayName}; migrate to canonical .agents/skills`,
+            suggestedCommand: `mkdir -p ${quoteShellArg(canonicalRoot)} && mv ${quoteShellArg(childPath)} ${quoteShellArg(join7(canonicalRoot, skillId))}`,
+            actionHint: "\u5C06\u8BE5\u6280\u80FD\u8FC1\u79FB\u81F3\u5171\u4EAB\u76EE\u5F55 .agents/skills\uFF0C\u518D\u56DE\u5230\u5DE5\u4F5C\u53F0\u6267\u884C\u7EB3\u7BA1"
           });
         }
       }
@@ -21587,22 +21643,28 @@ async function auditSkillsHealth(input2) {
   for (const item of scanPlan.items) {
     const candidateAgent = agentByCandidatePath.get(item.originPath);
     if (item.disposition === "adoptable" && item.mergePaths.length > 0) {
+      const copyPaths = [item.originPath, ...item.mergePaths];
       findings.push({
         kind: "duplicate-same-digest",
         severity: "info",
         skillId: item.id,
         path: item.originPath,
         ...candidateAgent ? { agent: candidateAgent } : {},
-        message: `${item.mergePaths.length + 1} identical copies found across agent roots`
+        message: `${item.mergePaths.length + 1} identical copies found across agent roots`,
+        suggestedCommand: `ls -ld ${copyPaths.map(quoteShellArg).join(" ")}`,
+        actionHint: "\u591A\u4E2A\u76EE\u5F55\u5B58\u5728\u5185\u5BB9\u76F8\u540C\u7684\u526F\u672C\uFF0C\u53EF\u5728\u300C\u5DF2\u5B89\u88C5\u6280\u80FD\u300D\u9875\u7B7E\u6267\u884C\u7EB3\u7BA1\u81EA\u52A8\u5408\u5E76\u4E3A\u94FE\u63A5"
       });
     } else if (item.disposition === "conflict") {
+      const conflictCmd = item.conflicts.length >= 2 ? `diff -ru ${quoteShellArg(item.conflicts[0].path)} ${quoteShellArg(item.conflicts[1].path)}` : `ls -ld ${quoteShellArg(item.originPath)}`;
       findings.push({
         kind: "digest-conflict",
         severity: "error",
         skillId: item.id,
         path: item.originPath,
         ...candidateAgent ? { agent: candidateAgent } : {},
-        message: `${item.conflicts.length} conflicting variants with differing content digests`
+        message: `${item.conflicts.length} conflicting variants with differing content digests`,
+        suggestedCommand: conflictCmd,
+        actionHint: "\u540C\u540D\u6280\u80FD\u5728\u4E0D\u540C\u76EE\u5F55\u5B58\u5728\u5185\u5BB9\u5DEE\u5F02\uFF0C\u8BF7\u5BF9\u6BD4\u540E\u4FDD\u7559\u6240\u9700\u7248\u672C\u5E76\u6E05\u7406\u5176\u4F59\u526F\u672C"
       });
     } else if (item.disposition === "copy-drifted") {
       findings.push({
@@ -21611,7 +21673,9 @@ async function auditSkillsHealth(input2) {
         skillId: item.id,
         path: item.originPath,
         ...candidateAgent ? { agent: candidateAgent } : {},
-        message: "copyMode placement has local edits differing from Vault master"
+        message: "copyMode placement has local edits differing from Vault master",
+        suggestedCommand: `diff -ru ${quoteShellArg(join7(input2.vaultRoot, item.id))} ${quoteShellArg(item.originPath)}`,
+        actionHint: "Copy \u6A21\u5F0F\u672C\u5730\u526F\u672C\u4E0E Vault \u4E3B\u7248\u672C\u5B58\u5728\u5DEE\u5F02\uFF0C\u8BF7\u5BF9\u6BD4\u540E\u51B3\u5B9A\u540C\u6B65\u56DE Vault \u6216\u91CD\u7F6E\u526F\u672C"
       });
     } else if (item.disposition === "copy-outdated") {
       findings.push({
@@ -21620,7 +21684,9 @@ async function auditSkillsHealth(input2) {
         skillId: item.id,
         path: item.originPath,
         ...candidateAgent ? { agent: candidateAgent } : {},
-        message: "copyMode placement is behind Vault master digest and can be refreshed"
+        message: "copyMode placement is behind Vault master digest and can be refreshed",
+        suggestedCommand: `diff -ru ${quoteShellArg(join7(input2.vaultRoot, item.id))} ${quoteShellArg(item.originPath)}`,
+        actionHint: "Copy \u6A21\u5F0F\u672C\u5730\u526F\u672C\u7248\u672C\u843D\u540E\u4E8E Vault\uFF0C\u53EF\u901A\u8FC7\u91CD\u65B0\u542F\u7528\u6280\u80FD\u5237\u65B0\u540C\u6B65"
       });
     }
   }
@@ -21630,12 +21696,16 @@ async function auditSkillsHealth(input2) {
       readonlyRoots: input2.readonlyRoots,
       semantics
     })) {
+      const vaultChildIsSymlink = await lstat3(vaultChild).then((s) => s.isSymbolicLink()).catch(() => false);
       findings.push({
         kind: "readonly-plugin-exposure",
         severity: "error",
         skillId: vaultChild.split(/[/\\]/).at(-1) ?? vaultChild,
         path: vaultChild,
-        message: "Vault entry links or resolves to a readonly plugin directory"
+        message: "Vault entry links or resolves to a readonly plugin directory",
+        suggestedCommand: vaultChildIsSymlink ? `rm ${quoteShellArg(vaultChild)}` : `rm -rf ${quoteShellArg(vaultChild)}`,
+        actionHint: "\u79FB\u9664\u6307\u5411\u53EA\u8BFB\u63D2\u4EF6\u76EE\u5F55\u7684\u94FE\u63A5\u6216\u526F\u672C\uFF0C\u907F\u514D\u8BEF\u4FEE\u6539\u63D2\u4EF6\u5185\u7F6E\u6280\u80FD",
+        ...vaultChildIsSymlink ? { fixable: true } : {}
       });
     }
   }
@@ -21648,7 +21718,9 @@ async function auditSkillsHealth(input2) {
         skillId: pluginSkill.id,
         path: pluginSkill.skillDirectoryPath,
         ...pluginSkill.agent ? { agent: pluginSkill.agent } : {},
-        message: `Managed skill '${pluginSkill.id}' shares name with readonly plugin skill '${pluginSkill.pluginName}'`
+        message: `Managed skill '${pluginSkill.id}' shares name with readonly plugin skill '${pluginSkill.pluginName}'`,
+        suggestedCommand: `ls -ld ${quoteShellArg(join7(input2.vaultRoot, pluginSkill.id))} ${quoteShellArg(pluginSkill.skillDirectoryPath)}`,
+        actionHint: "\u53D7\u7BA1\u6280\u80FD\u4E0E\u53EA\u8BFB\u63D2\u4EF6\u5185\u7F6E\u6280\u80FD\u540C\u540D\uFF0C\u5EFA\u8BAE\u505C\u7528\u6216\u91CD\u547D\u540D\u53D7\u7BA1\u526F\u672C\u4EE5\u907F\u514D\u8986\u76D6\u51B2\u7A81"
       });
     }
   }
@@ -21745,8 +21817,8 @@ var InMemoryHierarchicalLockManager = class {
     }
     this.heldScopes.add(scopeKey);
     let resolveQueue;
-    const queuePromise = new Promise((resolve11) => {
-      resolveQueue = resolve11;
+    const queuePromise = new Promise((resolve12) => {
+      resolveQueue = resolve12;
     });
     this.scopeQueues.set(scopeKey, queuePromise);
     return async () => {
@@ -21761,7 +21833,7 @@ var InMemoryHierarchicalLockManager = class {
       if (Date.now() >= deadline) {
         return null;
       }
-      await new Promise((resolve11) => setTimeout(resolve11, 10));
+      await new Promise((resolve12) => setTimeout(resolve12, 10));
     }
     this.heldSkills.add(skillKey);
     return async () => {
@@ -21882,7 +21954,7 @@ import { readFile as readFile3, stat as stat4 } from "node:fs/promises";
 import { join as join13 } from "node:path";
 
 // src/infra/skill-provider-destinations.ts
-import { join as join9, resolve as resolve4 } from "node:path";
+import { join as join9, resolve as resolve5 } from "node:path";
 
 // src/contracts/skill-install-providers.ts
 function toInstallProviderEntry(descriptor) {
@@ -21908,7 +21980,7 @@ function isSkillInstallProviderId(value) {
 
 // src/infra/skill-provider-destinations.ts
 function normalizedPath(path) {
-  const normalized = resolve4(path);
+  const normalized = resolve5(path);
   return process.platform === "win32" ? normalized.toLocaleLowerCase("en-US") : normalized;
 }
 function resolveSkillProviderDestinations(input2) {
@@ -21942,21 +22014,21 @@ function resolveSkillProviderDestinations(input2) {
 
 // src/enablement/skill-enablement-journal.ts
 import { cp, lstat as lstat4, mkdir as mkdir4, readlink as readlink3, realpath as realpath5, rm as rm3, symlink as symlink3 } from "node:fs/promises";
-import { dirname as dirname5, join as join11, relative as relative3, resolve as resolve6 } from "node:path";
+import { dirname as dirname6, join as join11, relative as relative3, resolve as resolve7 } from "node:path";
 
 // src/infra/skill-alias.ts
 import { mkdir as mkdir3, realpath as realpath4, symlink as symlink2 } from "node:fs/promises";
-import { basename as basename2, dirname as dirname4, join as join10, relative as relative2, resolve as resolve5 } from "node:path";
+import { basename as basename2, dirname as dirname5, join as join10, relative as relative2, resolve as resolve6 } from "node:path";
 async function createNativeSkillAlias(canonicalPath, destinationPath) {
-  const parent = dirname4(destinationPath);
+  const parent = dirname5(destinationPath);
   await mkdir3(parent, { recursive: true });
   if (process.platform === "win32") {
-    await symlink2(resolve5(canonicalPath), destinationPath, "junction");
+    await symlink2(resolve6(canonicalPath), destinationPath, "junction");
     return;
   }
-  const realParent = await realpath4(parent).catch(() => resolve5(parent));
-  const realCanonicalParent = await realpath4(dirname4(canonicalPath)).catch(
-    () => resolve5(dirname4(canonicalPath))
+  const realParent = await realpath4(parent).catch(() => resolve6(parent));
+  const realCanonicalParent = await realpath4(dirname5(canonicalPath)).catch(
+    () => resolve6(dirname5(canonicalPath))
   );
   const targetPath = join10(realCanonicalParent, basename2(canonicalPath));
   await symlink2(relative2(realParent, targetPath), destinationPath, "dir");
@@ -22056,18 +22128,18 @@ async function adoptCanonicalEntryToVault(canonicalPath, vaultPath) {
   if (await pathExists(vaultPath) || !await pathExists(canonicalPath)) {
     return false;
   }
-  await mkdir4(dirname5(vaultPath), { recursive: true });
+  await mkdir4(dirname6(vaultPath), { recursive: true });
   const entryStat = await lstat4(canonicalPath);
   if (entryStat.isSymbolicLink()) {
     const rawTarget = await readlink3(canonicalPath);
     const resolvedTarget = await realpath5(canonicalPath).catch(
-      () => resolve6(dirname5(canonicalPath), rawTarget)
+      () => resolve7(dirname6(canonicalPath), rawTarget)
     );
     if (process.platform === "win32") {
       await symlink3(resolvedTarget, vaultPath, "junction");
     } else {
-      const realVaultParent = await realpath5(dirname5(vaultPath)).catch(
-        () => resolve6(dirname5(vaultPath))
+      const realVaultParent = await realpath5(dirname6(vaultPath)).catch(
+        () => resolve7(dirname6(vaultPath))
       );
       await symlink3(relative3(realVaultParent, resolvedTarget), vaultPath, "dir");
     }
@@ -22096,7 +22168,7 @@ async function executeEnablementAction(action, readonlyRoots) {
       return true;
     case "copy":
       await rm3(action.destinationPath, { recursive: true, force: true }).catch(() => void 0);
-      await mkdir4(dirname5(action.destinationPath), { recursive: true });
+      await mkdir4(dirname6(action.destinationPath), { recursive: true });
       await cp(action.sourcePath, action.destinationPath, { recursive: true, verbatimSymlinks: true });
       return true;
     case "remove-copy":
@@ -22127,7 +22199,7 @@ async function executeLegacyV1Action(action, readonlyRoots) {
       if (await pathExists(action.destinationPath) || !await pathExists(action.sourcePath)) {
         return false;
       }
-      await mkdir4(dirname5(action.destinationPath), { recursive: true });
+      await mkdir4(dirname6(action.destinationPath), { recursive: true });
       await renameSkillPathWithWindowsRetry(action.sourcePath, action.destinationPath);
       return true;
   }
@@ -22312,7 +22384,7 @@ async function applyPlanTransactionally(input2) {
 
 // src/enablement/skill-enablement-planner.ts
 import { lstat as lstat5, readlink as readlink4 } from "node:fs/promises";
-import { join as join12, resolve as resolve7 } from "node:path";
+import { join as join12, resolve as resolve8 } from "node:path";
 async function observePlacement(skillId, destination) {
   const destinationPath = join12(destination.rootPath, skillId);
   const entryStat = await lstat5(destinationPath).catch(() => null);
@@ -22332,7 +22404,7 @@ async function observePlacement(skillId, destination) {
   if (isSym) {
     const raw = await readlink4(destinationPath).catch(() => null);
     if (raw !== null) {
-      linkTarget = resolve7(destination.rootPath, raw);
+      linkTarget = resolve8(destination.rootPath, raw);
     }
   }
   return {
@@ -22811,7 +22883,7 @@ function detectPackLocalAgents(homeDirectory) {
 // src/packs/skill-pack-service.ts
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { mkdir as mkdir5, readFile as readFile4, rename as rename2, rm as rm4, writeFile as writeFile2 } from "node:fs/promises";
-import { dirname as dirname6, join as join15 } from "node:path";
+import { dirname as dirname7, join as join15 } from "node:path";
 
 // src/packs/skill-pack-rule-eval.ts
 var CONFLICT_SOURCE_KIND = "conflict";
@@ -22945,7 +23017,7 @@ function skillPackFilePath(scope, home, project) {
   return join15(project, ".pmstudio", "packs.json");
 }
 function skillPackUndoRingPath(packsFilePath) {
-  return join15(dirname6(packsFilePath), "history", "undo-ring.json");
+  return join15(dirname7(packsFilePath), "history", "undo-ring.json");
 }
 async function readSkillPacks(path) {
   try {
@@ -22964,7 +23036,7 @@ async function readSkillPacks(path) {
   }
 }
 async function writeAtomicJson(path, value) {
-  await mkdir5(dirname6(path), { recursive: true });
+  await mkdir5(dirname7(path), { recursive: true });
   const temporary = `${path}.${randomUUID3()}.tmp`;
   try {
     await writeFile2(temporary, `${JSON.stringify(value, null, 2)}
@@ -23260,7 +23332,7 @@ var SkillPackService = class {
 
 // src/vault/readonly-plugin-scanner.ts
 import { readdir as readdir3, readFile as readFile5, realpath as realpath6, stat as stat6 } from "node:fs/promises";
-import { basename as basename3, dirname as dirname7, join as join16 } from "node:path";
+import { basename as basename3, dirname as dirname8, join as join16 } from "node:path";
 var MAX_WALK_DEPTH = 5;
 var MAX_SKILL_FILE_BYTES = 256 * 1024;
 var SKIP_DIR_NAMES = /* @__PURE__ */ new Set([".git", "node_modules"]);
@@ -23576,7 +23648,7 @@ async function scanReadonlyPluginSkills(input2) {
     records
   });
   if (input2.pluginRoot && !isWslUncPath(input2.pluginRoot)) {
-    const pluginsParent = dirname7(input2.pluginRoot);
+    const pluginsParent = dirname8(input2.pluginRoot);
     const siblingDirs = await listDirectSubdirectories(pluginsParent);
     for (const siblingDir of siblingDirs) {
       const manifest = await readPluginManifest(siblingDir, "orca");
@@ -23610,7 +23682,7 @@ async function scanReadonlyPluginSkills(input2) {
 // src/vault/skill-vault-adopt.ts
 import { randomUUID as randomUUID4 } from "node:crypto";
 import { cp as cp2, lstat as lstat6, mkdir as mkdir6, readFile as readFile6, realpath as realpath7, rm as rm5, stat as stat7, symlink as symlink4 } from "node:fs/promises";
-import { basename as basename4, dirname as dirname8, join as join17, relative as relative4, resolve as resolve8 } from "node:path";
+import { basename as basename4, dirname as dirname9, join as join17, relative as relative4, resolve as resolve9 } from "node:path";
 var nativeSkillVaultAdoptFilesystem = {
   mkdir: async (path) => {
     await mkdir6(path, { recursive: true });
@@ -23623,18 +23695,18 @@ var nativeSkillVaultAdoptFilesystem = {
   lstat: (path) => lstat6(path).catch(() => null)
 };
 function stagePathFor(target) {
-  return join17(dirname8(target), `.${basename4(target)}${SKILL_VAULT_STAGE_MARKER}${randomUUID4()}`);
+  return join17(dirname9(target), `.${basename4(target)}${SKILL_VAULT_STAGE_MARKER}${randomUUID4()}`);
 }
 async function createVaultLink(vaultPath, originPath, filesystem) {
-  await filesystem.mkdir(dirname8(originPath));
+  await filesystem.mkdir(dirname9(originPath));
   if (process.platform === "win32") {
-    await filesystem.symlink(resolve8(vaultPath), originPath, "junction");
+    await filesystem.symlink(resolve9(vaultPath), originPath, "junction");
     return;
   }
-  const realOriginParent = await realpath7(dirname8(originPath)).catch(
-    () => resolve8(dirname8(originPath))
+  const realOriginParent = await realpath7(dirname9(originPath)).catch(
+    () => resolve9(dirname9(originPath))
   );
-  const realVaultPath = await realpath7(vaultPath).catch(() => resolve8(vaultPath));
+  const realVaultPath = await realpath7(vaultPath).catch(() => resolve9(vaultPath));
   await filesystem.symlink(relative4(realOriginParent, realVaultPath), originPath, "dir");
 }
 async function adoptSkillsIntoVault(input2) {
@@ -23678,7 +23750,7 @@ async function adoptSkillsIntoVault(input2) {
         continue;
       }
       const vaultPath = skillVaultEntryRoot(input2.vaultRoot, item.id);
-      await filesystem.mkdir(dirname8(vaultPath));
+      await filesystem.mkdir(dirname9(vaultPath));
       await filesystem.rename(stagePath, vaultPath);
       movedToVault.set(item.originPath, vaultPath);
     }
@@ -23792,14 +23864,216 @@ function truncatePluginDescriptions(skills) {
 function isLocalHostId(hostId) {
   return hostId === null || hostId === void 0 || hostId === "local";
 }
-function buildAgentRegistrySummary() {
+function buildAgentRegistrySummary(detectedIds = /* @__PURE__ */ new Set(), enabledIds = /* @__PURE__ */ new Set()) {
   return AGENT_SKILL_DESCRIPTORS.map((descriptor) => ({
     id: descriptor.id,
     displayName: descriptor.displayName,
     capability: descriptor.capability,
     readsCanonical: descriptor.readsCanonical.global || descriptor.readsCanonical.workspace,
-    ...descriptor.delegatesTo ? { delegatesTo: descriptor.delegatesTo } : {}
+    ...descriptor.delegatesTo ? { delegatesTo: descriptor.delegatesTo } : {},
+    detected: detectedIds.has(descriptor.id),
+    enabled: enabledIds.has(descriptor.id)
   }));
+}
+async function isDirectoryPath(targetPath) {
+  return stat8(targetPath).then((s) => s.isDirectory()).catch(() => false);
+}
+async function detectInstalledAgentIds(homeDirectory, workspaceDirectory) {
+  const detected = /* @__PURE__ */ new Set();
+  await Promise.all(
+    AGENT_SKILL_DESCRIPTORS.map(async (descriptor) => {
+      if (descriptor.capability === "unsupported" || descriptor.capability === "delegate") {
+        return;
+      }
+      const globalDirs = [];
+      if (descriptor.installTargets.globalSegments) {
+        globalDirs.push(join18(homeDirectory, ...descriptor.installTargets.globalSegments));
+      }
+      for (const segs of descriptor.discoveryOnlyRoots?.globalSegments ?? []) {
+        globalDirs.push(join18(homeDirectory, ...segs));
+      }
+      if (descriptor.id === "pi") {
+        globalDirs.push(join18(homeDirectory, ".pi", "agent"), join18(homeDirectory, ".pi"));
+      }
+      const workspaceDirs = [];
+      if (workspaceDirectory) {
+        if (descriptor.installTargets.workspaceSegments) {
+          workspaceDirs.push(join18(workspaceDirectory, ...descriptor.installTargets.workspaceSegments));
+        }
+        for (const segs of descriptor.discoveryOnlyRoots?.workspaceSegments ?? []) {
+          workspaceDirs.push(join18(workspaceDirectory, ...segs));
+        }
+        if (descriptor.id === "pi") {
+          workspaceDirs.push(join18(workspaceDirectory, ".pi", "skills"), join18(workspaceDirectory, ".pi"));
+        }
+      }
+      for (const dir of /* @__PURE__ */ new Set([...globalDirs, ...workspaceDirs])) {
+        if (await isDirectoryPath(dir)) {
+          detected.add(descriptor.id);
+          return;
+        }
+      }
+    })
+  );
+  return detected;
+}
+function isPathInsideRoot(candidate, root) {
+  const normCandidate = resolve10(candidate).replace(/\\/g, "/");
+  const normRoot = resolve10(root).replace(/\\/g, "/");
+  const rootPrefix = normRoot.endsWith("/") ? normRoot : `${normRoot}/`;
+  if (process.platform === "win32") {
+    const lowerC = normCandidate.toLocaleLowerCase("en-US");
+    const lowerR = normRoot.toLocaleLowerCase("en-US");
+    const lowerP = rootPrefix.toLocaleLowerCase("en-US");
+    return lowerC === lowerR || lowerC.startsWith(lowerP);
+  }
+  return normCandidate === normRoot || normCandidate.startsWith(rootPrefix);
+}
+function extractOriginUrlFromGitConfig(content) {
+  let inOriginSection = false;
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#") || line.startsWith(";")) {
+      continue;
+    }
+    if (line.startsWith("[")) {
+      inOriginSection = /^\[remote\s+"origin"\]$/i.test(line);
+      continue;
+    }
+    if (inOriginSection) {
+      const match = /^url\s*=\s*(.+)$/.exec(line);
+      if (match?.[1]) {
+        return match[1].trim();
+      }
+    }
+  }
+  return null;
+}
+function parseGitRemoteName(remoteUrl) {
+  const trimmed = remoteUrl.trim().replace(/\/+$/, "").replace(/\.git$/i, "");
+  if (!trimmed) {
+    return null;
+  }
+  const colonIdx = trimmed.lastIndexOf(":");
+  const slashIdx = trimmed.lastIndexOf("/");
+  const sepIdx = Math.max(colonIdx, slashIdx);
+  if (sepIdx >= 0 && sepIdx < trimmed.length - 1) {
+    const name = trimmed.slice(sepIdx + 1).trim();
+    return name || null;
+  }
+  return trimmed;
+}
+function createSkillGroupResolver() {
+  const gitRepoCache = /* @__PURE__ */ new Map();
+  const readRepoLabel = async (repoRoot) => {
+    const gitMarker = join18(repoRoot, ".git");
+    const markerStat = await lstat7(gitMarker).catch(() => null);
+    let configPath = null;
+    if (markerStat?.isDirectory()) {
+      configPath = join18(gitMarker, "config");
+    } else if (markerStat?.isFile()) {
+      const markerText = await readFile7(gitMarker, "utf8").catch(() => "");
+      const match = /^gitdir:\s*(.+)$/im.exec(markerText);
+      if (match?.[1]) {
+        const gitDir = resolve10(repoRoot, match[1].trim());
+        const commonDirText = await readFile7(join18(gitDir, "commondir"), "utf8").catch(() => null);
+        const baseGitDir = commonDirText ? resolve10(gitDir, commonDirText.trim()) : gitDir;
+        configPath = join18(baseGitDir, "config");
+      }
+    }
+    if (configPath) {
+      const configText = await readFile7(configPath, "utf8").catch(() => null);
+      if (configText) {
+        const originUrl = extractOriginUrlFromGitConfig(configText);
+        const remoteName = originUrl ? parseGitRemoteName(originUrl) : null;
+        if (remoteName) {
+          return remoteName;
+        }
+      }
+    }
+    return basename5(repoRoot) || repoRoot;
+  };
+  const findGitRepo = (dir) => {
+    const cached2 = gitRepoCache.get(dir);
+    if (cached2) {
+      return cached2;
+    }
+    const promise2 = (async () => {
+      const hasGit = await lstat7(join18(dir, ".git")).then(() => true).catch(() => false);
+      if (hasGit) {
+        const realRepoRoot = await realpath8(dir).catch(() => resolve10(dir));
+        const label = await readRepoLabel(realRepoRoot);
+        return { root: realRepoRoot, label };
+      }
+      const parent = dirname10(dir);
+      if (parent === dir) {
+        return null;
+      }
+      return findGitRepo(parent);
+    })();
+    gitRepoCache.set(dir, promise2);
+    return promise2;
+  };
+  const resolveFromDir = async (resolvedDir) => {
+    const repo = await findGitRepo(resolvedDir);
+    if (repo) {
+      return {
+        groupKind: "repo",
+        groupKey: `repo:${repo.root}`,
+        groupLabel: repo.label
+      };
+    }
+    const parentDir = dirname10(resolvedDir);
+    return {
+      groupKind: "parent-dir",
+      groupKey: `dir:${parentDir}`,
+      groupLabel: parentDir
+    };
+  };
+  return {
+    async resolveForManaged(params) {
+      const vaultDir = join18(params.vaultRoot, params.id);
+      const realVaultRoot = await realpath8(params.vaultRoot).catch(() => resolve10(params.vaultRoot));
+      const vaultStat = await lstat7(vaultDir).catch(() => null);
+      if (vaultStat?.isSymbolicLink()) {
+        const realVaultTarget = await realpath8(vaultDir).catch(() => null);
+        if (realVaultTarget && !isPathInsideRoot(realVaultTarget, realVaultRoot)) {
+          return resolveFromDir(realVaultTarget);
+        }
+      }
+      const originPath = params.originPath;
+      if (originPath) {
+        const originStat = await lstat7(originPath).catch(() => null);
+        if (originStat?.isSymbolicLink()) {
+          const realOrigin = await realpath8(originPath).catch(() => null);
+          if (realOrigin && !isPathInsideRoot(realOrigin, realVaultRoot)) {
+            return resolveFromDir(realOrigin);
+          }
+        }
+        const realOriginParent = await realpath8(dirname10(originPath)).catch(
+          () => resolve10(dirname10(originPath))
+        );
+        return resolveFromDir(join18(realOriginParent, basename5(originPath)));
+      }
+      if (vaultStat) {
+        const realVaultDir = await realpath8(vaultDir).catch(() => resolve10(vaultDir));
+        return resolveFromDir(realVaultDir);
+      }
+      const canonicalDir = join18(params.canonicalRoot, params.id);
+      const realCanonical = await realpath8(canonicalDir).catch(async () => {
+        const parent = await realpath8(dirname10(canonicalDir)).catch(() => resolve10(dirname10(canonicalDir)));
+        return join18(parent, basename5(canonicalDir));
+      });
+      return resolveFromDir(realCanonical);
+    },
+    async resolveForAdoptable(originPath) {
+      const realOrigin = await realpath8(originPath).catch(async () => {
+        const parent = await realpath8(dirname10(originPath)).catch(() => resolve10(dirname10(originPath)));
+        return join18(parent, basename5(originPath));
+      });
+      return resolveFromDir(realOrigin);
+    }
+  };
 }
 async function readSkillMdSummary(skillDirectories) {
   for (const dir of skillDirectories) {
@@ -23836,7 +24110,7 @@ async function isSymlinkIntoRoot(candidatePath, targetRoot) {
     return false;
   }
   const realCandidate = await realpath8(candidatePath).catch(() => null);
-  const realRoot = await realpath8(targetRoot).catch(() => resolve9(targetRoot));
+  const realRoot = await realpath8(targetRoot).catch(() => resolve10(targetRoot));
   if (!realCandidate) {
     return false;
   }
@@ -23886,7 +24160,6 @@ var SkillsWorkerService = class {
   options;
   fileIO = createLocalSkillEnablementFileIO();
   coordinator;
-  agentRegistry = buildAgentRegistrySummary();
   async resolveActiveWorkspace() {
     const context = await this.options.hostBridge.readWorkspaceContext().catch(() => null);
     const workspaceId = context?.workspaceId ?? null;
@@ -24036,6 +24309,17 @@ var SkillsWorkerService = class {
     const supportedDescriptors = AGENT_SKILL_DESCRIPTORS.filter(
       (descriptor) => descriptor.capability !== "unsupported"
     );
+    const groupResolver = createSkillGroupResolver();
+    const explicitlyEnabledAgents = /* @__PURE__ */ new Set();
+    for (const overrides of [userState.userAgentOverrides, userState.projectAgentOverrides]) {
+      for (const agentMap of Object.values(overrides ?? {})) {
+        for (const [agentId, enabled] of Object.entries(agentMap ?? {})) {
+          if (enabled === true) {
+            explicitlyEnabledAgents.add(agentId);
+          }
+        }
+      }
+    }
     const buildViewItems = async (params) => {
       const items = [];
       const entryById = new Map((params.index?.entries ?? []).map((entry) => [entry.id, entry]));
@@ -24056,6 +24340,12 @@ var SkillsWorkerService = class {
           description = description ?? fallback.description;
         }
         const sourceKind = entry ? entry.sourceKind : params.vaultIds.has(id) ? "installed" : "canonical-unindexed";
+        const groupMeta = await groupResolver.resolveForManaged({
+          id,
+          vaultRoot: params.vaultRoot,
+          canonicalRoot: params.canonicalRoot,
+          originPath: entry?.originPath ?? null
+        });
         const agents = resolution.agents ?? {};
         const agentDetails = resolution.agentDetails ?? {};
         let enabledAgentCount = 0;
@@ -24076,6 +24366,7 @@ var SkillsWorkerService = class {
           description: truncateDescription(description),
           sourceKind,
           scope: params.scope,
+          ...groupMeta,
           tags: entry?.tags ?? [],
           author: entry?.author ?? null,
           copyMode: Boolean(entry?.copyMode),
@@ -24114,11 +24405,26 @@ var SkillsWorkerService = class {
     );
     const adoptableSkills = [];
     if (input2.includeAdoptable) {
+      const vaultedUserIds = /* @__PURE__ */ new Set([
+        ...userVaultIds,
+        ...userIndex?.entries.map((entry) => entry.id) ?? []
+      ]);
+      const vaultedWsIds = /* @__PURE__ */ new Set([
+        ...wsVaultIds,
+        ...wsIndex?.entries.map((entry) => entry.id) ?? []
+      ]);
       const scanAndMap = async (scope, baseDir, vaultRoot, index) => {
-        const candidatePaths = await collectCandidatePathsForScope(
+        const rawCandidatePaths = await collectCandidatePathsForScope(
           scope === "user" ? "global" : "workspace",
           baseDir
         );
+        const candidatePaths = [];
+        for (const candidatePath of rawCandidatePaths) {
+          if (scope === "workspace" && (await isSymlinkIntoRoot(candidatePath, userVaultRoot) || await isSymlinkIntoRoot(candidatePath, userCanonicalRoot))) {
+            continue;
+          }
+          candidatePaths.push(candidatePath);
+        }
         const plan = await scanSkillVault({
           homeDirectory: home,
           vaultRoot,
@@ -24126,17 +24432,30 @@ var SkillsWorkerService = class {
           index,
           readonlyRoots: input2.readonlyRoots
         });
+        const scopeVaultedIds = scope === "user" ? vaultedUserIds : vaultedWsIds;
         for (const item of plan.items) {
           if (item.disposition !== "adoptable" && item.disposition !== "conflict") {
             continue;
           }
-          const summary = await readSkillMdSummary([item.originPath]);
+          if (item.disposition === "adoptable") {
+            if (scopeVaultedIds.has(item.id)) {
+              continue;
+            }
+            if (scope === "workspace" && vaultedUserIds.has(item.id)) {
+              continue;
+            }
+          }
+          const [summary, groupMeta] = await Promise.all([
+            readSkillMdSummary([item.originPath]),
+            groupResolver.resolveForAdoptable(item.originPath)
+          ]);
           adoptableSkills.push({
             rowKey: `${scope}:${item.id}`,
             id: item.id,
             name: summary.name ?? item.id,
             description: truncateDescription(summary.description),
             scope,
+            ...groupMeta,
             disposition: item.disposition,
             digest: item.digest,
             originPath: item.originPath,
@@ -24153,26 +24472,30 @@ var SkillsWorkerService = class {
         (a, b) => a.name.localeCompare(b.name) || a.scope.localeCompare(b.scope) || a.id.localeCompare(b.id)
       );
     }
-    return { managedSkills, adoptableSkills };
+    return { managedSkills, adoptableSkills, explicitlyEnabledAgents };
   }
   async getWorkbenchSnapshot() {
     const activeWorkspace = await this.resolveActiveWorkspace();
     const { pluginSkills, readonlyRoots, pluginScanError } = await this.scanPluginsSafe(
       activeWorkspace.workspaceDirectory
     );
-    const { managedSkills, adoptableSkills } = await this.collectManagedAndAdoptable({
-      workspaceDirectory: activeWorkspace.workspaceDirectory,
-      readonlyRoots,
-      includeAgents: true,
-      includeAdoptable: true
-    });
+    const [{ managedSkills, adoptableSkills, explicitlyEnabledAgents }, detectedIds] = await Promise.all([
+      this.collectManagedAndAdoptable({
+        workspaceDirectory: activeWorkspace.workspaceDirectory,
+        readonlyRoots,
+        includeAgents: true,
+        includeAdoptable: true
+      }),
+      detectInstalledAgentIds(this.options.homeDirectory, activeWorkspace.workspaceDirectory)
+    ]);
+    const enabledIds = /* @__PURE__ */ new Set([...detectedIds, ...explicitlyEnabledAgents]);
     return {
       activeWorkspace: {
         workspaceId: activeWorkspace.workspaceId,
         workspaceName: activeWorkspace.workspaceName,
         isLocalDirectoryAvailable: activeWorkspace.isLocalDirectoryAvailable
       },
-      agentRegistry: this.agentRegistry,
+      agentRegistry: buildAgentRegistrySummary(detectedIds, enabledIds),
       managedSkills: managedSkills.map(omitAgentMatrix),
       adoptableSkills,
       pluginSkills,
@@ -24753,13 +25076,69 @@ var SkillsWorkerService = class {
       readonlyRoots
     });
   }
+  async fixAuditFindings(input2 = {}) {
+    const activeWorkspace = await this.resolveActiveWorkspace();
+    const ws = activeWorkspace.workspaceDirectory;
+    const { readonlyRoots } = await this.scanPluginsSafe(ws);
+    const initialReport = await this.runAudit(input2.scope);
+    const allowedKinds = new Set(
+      input2.kinds && input2.kinds.length > 0 ? input2.kinds : ["orphan-symlink", "readonly-plugin-exposure"]
+    );
+    const requestedPaths = input2.paths ? new Set(input2.paths) : null;
+    const fixedPaths = [];
+    const skipped = [];
+    for (const finding of initialReport.findings) {
+      if (finding.kind !== "orphan-symlink" && finding.kind !== "readonly-plugin-exposure") {
+        continue;
+      }
+      if (!allowedKinds.has(finding.kind)) {
+        continue;
+      }
+      if (requestedPaths && !requestedPaths.has(finding.path)) {
+        continue;
+      }
+      if (!finding.fixable) {
+        skipped.push({ path: finding.path, reason: "not-auto-fixable" });
+        continue;
+      }
+      const entryStat = await lstat7(finding.path).catch(() => null);
+      if (!entryStat || !entryStat.isSymbolicLink()) {
+        skipped.push({ path: finding.path, reason: "not-a-symlink" });
+        continue;
+      }
+      if (finding.kind === "orphan-symlink") {
+        const resolved = await stat8(finding.path).catch(() => null);
+        if (resolved) {
+          skipped.push({ path: finding.path, reason: "target-exists" });
+          continue;
+        }
+      } else if (finding.kind === "readonly-plugin-exposure") {
+        const isExposure = await isReadonlySkillTarget(finding.path, { readonlyRoots });
+        if (!isExposure) {
+          skipped.push({ path: finding.path, reason: "not-readonly-exposure" });
+          continue;
+        }
+      }
+      try {
+        await unlink(finding.path);
+        fixedPaths.push(finding.path);
+      } catch (error62) {
+        skipped.push({
+          path: finding.path,
+          reason: error62 instanceof Error ? error62.message : String(error62)
+        });
+      }
+    }
+    const report = await this.runAudit(input2.scope);
+    return { fixedPaths, skipped, report };
+  }
 };
 
 // src/worker/plugin-worker.ts
 function resolvePluginRoot() {
   try {
     const currentFile = fileURLToPath(import.meta.url);
-    return resolve10(dirname9(currentFile), "..");
+    return resolve11(dirname11(currentFile), "..");
   } catch {
     return void 0;
   }
@@ -24888,6 +25267,16 @@ function activate(orca) {
     orca.panels.handle(SKILL_BRIDGE_METHODS.auditRun, (rawInput) => {
       const scope = rawInput && typeof rawInput === "object" && "scope" in rawInput ? PackScopeInputSchema.parse(rawInput).scope : void 0;
       return service.runAudit(scope);
+    })
+  );
+  disposables.push(
+    orca.panels.handle(SKILL_BRIDGE_METHODS.auditFix, async (rawInput) => {
+      const parsed = rawInput === void 0 ? {} : AuditFixInputSchema.parse(rawInput);
+      const result = await service.fixAuditFindings(parsed);
+      if (result.fixedPaths.length > 0) {
+        broadcastSkillsChanged(parsed.scope ?? "user", []);
+      }
+      return result;
     })
   );
   let firstWorkspaceReplay = true;

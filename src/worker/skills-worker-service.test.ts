@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -493,8 +493,226 @@ describe('SkillsWorkerService', () => {
       const matrixHandler = handlers.get(SKILL_BRIDGE_METHODS.skillAgentMatrix)
       expect(matrixHandler).toBeDefined()
       await expect(matrixHandler!({ skillId: '', scope: 'user' })).rejects.toThrow()
+      expect(handlers.get(SKILL_BRIDGE_METHODS.auditFix)).toBeDefined()
     } finally {
       dispose()
     }
+  })
+
+  it('deduplicates adoptable skills after batch adopt across agent dirs, symlinked repos, and user/workspace scopes', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'orca-worker-adopt-dedup-'))
+    roots.push(home)
+
+    const wsDir = join(home, 'ws-repo')
+    const extRepoDir = join(home, 'external-skills-repo')
+    await mkdir(join(home, '.pmstudio', 'skills'), { recursive: true })
+    await mkdir(join(home, '.agents', 'skills'), { recursive: true })
+    await mkdir(join(home, '.claude', 'skills'), { recursive: true })
+    await mkdir(join(home, '.codex', 'skills'), { recursive: true })
+    await mkdir(join(home, '.pi', 'agent', 'skills'), { recursive: true })
+    await mkdir(join(wsDir, '.pmstudio', 'skills'), { recursive: true })
+    await mkdir(join(wsDir, '.agents', 'skills'), { recursive: true })
+    await mkdir(join(wsDir, '.claude', 'skills'), { recursive: true })
+
+    // 1. Same skill duplicated across .claude and .codex in user scope
+    await createTestSkill(join(home, '.claude', 'skills'), 'shared-adopt', 'Shared Adopt', 'User multi-root')
+    await createTestSkill(join(home, '.codex', 'skills'), 'shared-adopt', 'Shared Adopt', 'User multi-root')
+
+    // 2. External git repo skill symlinked into ~/.pi/agent/skills
+    await mkdir(join(extRepoDir, '.git'), { recursive: true })
+    await writeFile(
+      join(extRepoDir, '.git', 'config'),
+      '[remote "origin"]\n\turl = https://github.com/acme/awesome-skills.git\n'
+    )
+    await createTestSkill(join(extRepoDir, 'skills'), 'repo-linked', 'Repo Linked', 'From git repo')
+    await symlink(
+      join(extRepoDir, 'skills', 'repo-linked'),
+      join(home, '.pi', 'agent', 'skills', 'repo-linked'),
+      process.platform === 'win32' ? 'junction' : 'dir'
+    )
+
+    // 3. Same skill name present in both user and workspace (and workspace symlink to user vault after adopt)
+    await createTestSkill(join(home, '.claude', 'skills'), 'cross-scope', 'Cross Scope', 'In both scopes')
+    await createTestSkill(join(wsDir, '.claude', 'skills'), 'cross-scope', 'Cross Scope', 'In both scopes')
+
+    // 4. Workspace-only adoptable skill inside workspace git repo
+    await mkdir(join(wsDir, '.git'), { recursive: true })
+    await writeFile(
+      join(wsDir, '.git', 'config'),
+      '[remote "origin"]\n\turl = git@github.com:acme/project-repo.git\n'
+    )
+    await createTestSkill(join(wsDir, '.claude', 'skills'), 'ws-only', 'WS Only', 'Workspace adoptable')
+
+    const service = new SkillsWorkerService({
+      homeDirectory: home,
+      etcCodexSkillsRoot: join(home, 'none-etc-codex'),
+      hostBridge: {
+        readWorkspaceContext: async () => ({
+          workspaceId: 'ws-1',
+          branch: 'main',
+          displayName: 'ws-repo'
+        }),
+        listWorkspaces: async () => ({
+          workspaces: [
+            {
+              id: 'ws-1',
+              kind: 'worktree',
+              name: 'ws-repo',
+              path: wsDir,
+              branch: 'main',
+              hostId: 'local'
+            }
+          ]
+        })
+      }
+    })
+
+    const before = await service.getWorkbenchSnapshot()
+    expect(before.adoptableSkills.map((a) => a.rowKey).sort()).toEqual([
+      'user:cross-scope',
+      'user:repo-linked',
+      'user:shared-adopt',
+      'workspace:cross-scope',
+      'workspace:ws-only'
+    ])
+
+    // Adopt all user adoptable skills and ws-only
+    const userIds = before.adoptableSkills.filter((a) => a.scope === 'user').map((a) => a.id)
+    const userRes = await service.adoptSkills({ scope: 'user', skillIds: userIds })
+    expect(userRes.adoptedIds.sort()).toEqual(['cross-scope', 'repo-linked', 'shared-adopt'])
+
+    const wsRes = await service.adoptSkills({ scope: 'workspace', skillIds: ['ws-only'] })
+    expect(wsRes.adoptedIds).toEqual(['ws-only'])
+
+    // Also add an unlinked leftover copy in another agent dir + a workspace symlink into user vault
+    await createTestSkill(join(home, '.agents', 'skills'), 'shared-adopt', 'Shared Adopt', 'User multi-root')
+    await symlink(
+      join(home, '.pmstudio', 'skills', 'shared-adopt'),
+      join(wsDir, '.agents', 'skills', 'shared-adopt'),
+      process.platform === 'win32' ? 'junction' : 'dir'
+    )
+
+    const after = await service.getWorkbenchSnapshot()
+    expect(after.adoptableSkills).toEqual([])
+    expect(after.managedSkills.some((m) => m.rowKey === 'user:repo-linked')).toBe(true)
+    expect(after.managedSkills.some((m) => m.rowKey === 'workspace:ws-only')).toBe(true)
+  })
+
+  it('populates repo/parent-dir group metadata, detected/enabled agent flags including pi, and audit fix', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'orca-worker-meta-audit-'))
+    roots.push(home)
+
+    const wsDir = join(home, 'my-project')
+    const extRepoDir = join(home, 'repos', 'team-skills')
+    await mkdir(join(home, '.pmstudio', 'skills'), { recursive: true })
+    await mkdir(join(home, '.agents', 'skills'), { recursive: true })
+    await mkdir(join(home, '.pi', 'agent'), { recursive: true })
+    await mkdir(join(home, '.claude', 'skills'), { recursive: true })
+    await mkdir(join(wsDir, '.pmstudio', 'skills'), { recursive: true })
+    await mkdir(join(wsDir, '.git'), { recursive: true })
+    await writeFile(
+      join(wsDir, '.git', 'config'),
+      '[remote "origin"]\n\turl = https://github.com/org/team-project.git\n'
+    )
+    await mkdir(join(extRepoDir, '.git'), { recursive: true })
+
+    // Non-repo skill in user vault
+    await createTestSkill(join(home, '.pmstudio', 'skills'), 'plain-skill', 'Plain Skill', 'No git repo')
+    // External git repo skill (without remote origin -> falls back to repo dir name 'team-skills')
+    await createTestSkill(join(extRepoDir, 'skills'), 'team-skill', 'Team Skill', 'In team repo')
+    await symlink(
+      join(extRepoDir, 'skills', 'team-skill'),
+      join(home, '.agents', 'skills', 'team-skill'),
+      process.platform === 'win32' ? 'junction' : 'dir'
+    )
+    // Workspace repo skill (with remote origin -> 'team-project')
+    await createTestSkill(join(wsDir, '.pmstudio', 'skills'), 'proj-skill', 'Proj Skill', 'In workspace repo')
+    // Non-repo adoptable skill
+    await createTestSkill(join(home, '.claude', 'skills'), 'loose-adopt', 'Loose Adopt', 'No git repo')
+
+    // Broken symlink for audit & fix
+    await symlink(join(home, 'missing-dir'), join(home, '.claude', 'skills', 'broken-link'), 'dir')
+
+    const service = new SkillsWorkerService({
+      homeDirectory: home,
+      etcCodexSkillsRoot: join(home, 'none-etc-codex'),
+      hostBridge: {
+        readWorkspaceContext: async () => ({
+          workspaceId: 'ws-1',
+          branch: 'main',
+          displayName: 'my-project'
+        }),
+        listWorkspaces: async () => ({
+          workspaces: [
+            {
+              id: 'ws-1',
+              kind: 'worktree',
+              name: 'my-project',
+              path: wsDir,
+              branch: 'main',
+              hostId: 'local'
+            }
+          ]
+        })
+      }
+    })
+
+    // Explicitly enable cursor via agent override to verify enabled flag merges overrides
+    await service.mutateEnablement({
+      kind: 'enable',
+      skillIds: ['plain-skill'],
+      writeScope: 'user',
+      skillScope: 'user',
+      agents: { cursor: true }
+    })
+
+    const snap = await service.getWorkbenchSnapshot()
+
+    const plain = snap.managedSkills.find((s) => s.id === 'plain-skill')
+    expect(plain?.groupKind).toBe('parent-dir')
+    const expectedVaultParent = await realpath(join(home, '.pmstudio', 'skills'))
+    expect(plain?.groupLabel).toBe(expectedVaultParent)
+    expect(plain?.groupKey).toBe(`dir:${expectedVaultParent}`)
+
+    const team = snap.managedSkills.find((s) => s.id === 'team-skill')
+    expect(team?.groupKind).toBe('repo')
+    expect(team?.groupLabel).toBe('team-skills')
+    expect(team?.groupKey).toBe(`repo:${await realpath(extRepoDir)}`)
+
+    const proj = snap.managedSkills.find((s) => s.id === 'proj-skill')
+    expect(proj?.groupKind).toBe('repo')
+    expect(proj?.groupLabel).toBe('team-project')
+    expect(proj?.groupKey).toBe(`repo:${await realpath(wsDir)}`)
+
+    const loose = snap.adoptableSkills.find((s) => s.id === 'loose-adopt')
+    expect(loose?.groupKind).toBe('parent-dir')
+    const expectedClaudeParent = await realpath(join(home, '.claude', 'skills'))
+    expect(loose?.groupLabel).toBe(expectedClaudeParent)
+    expect(loose?.groupKey).toBe(`dir:${expectedClaudeParent}`)
+
+    // Agent registry detection: pi (.pi/agent) & claude (.claude/skills) detected; cursor enabled via override; uninstalled canonical agent (goose) false
+    const byId = new Map(snap.agentRegistry.map((a) => [a.id, a]))
+    expect(byId.get('pi')?.detected).toBe(true)
+    expect(byId.get('pi')?.enabled).toBe(true)
+    expect(byId.get('claude')?.detected).toBe(true)
+    expect(byId.get('claude')?.enabled).toBe(true)
+    expect(byId.get('cursor')?.detected).toBe(false)
+    expect(byId.get('cursor')?.enabled).toBe(true)
+    expect(byId.get('goose')?.detected).toBe(false)
+    expect(byId.get('goose')?.enabled).toBe(false)
+
+    // Audit & safe auto-fix
+    const auditBefore = await service.runAudit('user')
+    const orphanFinding = auditBefore.findings.find((f) => f.kind === 'orphan-symlink')
+    expect(orphanFinding?.suggestedCommand).toContain('broken-link')
+    expect(orphanFinding?.actionHint).toBeTruthy()
+    expect(orphanFinding?.fixable).toBe(true)
+
+    const fixResult = await service.fixAuditFindings({ scope: 'user' })
+    expect(fixResult.fixedPaths).toEqual([join(home, '.claude', 'skills', 'broken-link')])
+    expect(fixResult.report.summary.orphanSymlinks).toBe(0)
+    await expect(lstat(join(home, '.claude', 'skills', 'broken-link'))).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
   })
 })

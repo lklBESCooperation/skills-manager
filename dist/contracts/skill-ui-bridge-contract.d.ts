@@ -21,6 +21,7 @@ export declare const SKILL_BRIDGE_METHODS: {
     readonly packsExport: 'skills.packs.export';
     readonly packsImport: 'skills.packs.import';
     readonly auditRun: 'skills.audit.run';
+    readonly auditFix: 'skills.audit.fix';
 };
 export declare const SKILL_BRIDGE_EVENTS: {
     readonly skillsChanged: 'skills.changed';
@@ -40,7 +41,10 @@ export type AgentRegistrySummaryItem = {
     capability: 'managed' | 'discovery-only' | 'delegate' | 'unsupported';
     readsCanonical: boolean;
     delegatesTo?: AgentId;
+    detected?: boolean;
+    enabled?: boolean;
 };
+export type SkillGroupKind = 'repo' | 'parent-dir';
 export type ManagedSkillViewItem = {
     /** Stable unique row key (`${scope}:${id}`). */
     rowKey: string;
@@ -49,6 +53,9 @@ export type ManagedSkillViewItem = {
     description: string | null;
     sourceKind: ManagedSkillSourceKind;
     scope: SkillScopeKind;
+    groupKind: SkillGroupKind;
+    groupKey: string;
+    groupLabel: string;
     tags: string[];
     author: string | null;
     copyMode: boolean;
@@ -66,6 +73,9 @@ export type AdoptableSkillViewItem = {
     name: string;
     description: string | null;
     scope: SkillScopeKind;
+    groupKind: SkillGroupKind;
+    groupKey: string;
+    groupLabel: string;
     disposition: 'adoptable' | 'conflict';
     digest: string;
     originPath: string;
@@ -470,3 +480,23 @@ export type PluginsRescanOutput = {
     pluginScanError: string | null;
 };
 export type AuditRunOutput = SkillAuditReport;
+export declare const AuditFixInputSchema: z.ZodObject<{
+    scope: z.ZodOptional<z.ZodEnum<{
+        project: "project";
+        user: "user";
+    }>>;
+    kinds: z.ZodOptional<z.ZodArray<z.ZodEnum<{
+        "orphan-symlink": "orphan-symlink";
+        "readonly-plugin-exposure": "readonly-plugin-exposure";
+    }>>>;
+    paths: z.ZodOptional<z.ZodArray<z.ZodString>>;
+}, z.core.$strict>;
+export type AuditFixInput = z.infer<typeof AuditFixInputSchema>;
+export type AuditFixOutput = {
+    fixedPaths: string[];
+    skipped: {
+        path: string;
+        reason: string;
+    }[];
+    report: SkillAuditReport;
+};

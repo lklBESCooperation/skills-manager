@@ -19,15 +19,25 @@ function isInsideVault(path, vaultRoot) {
 }
 async function linkResolvesInsideVault(candidatePath, vaultRoot) {
     // A managed placement is a link whose target resolves inside the vault root.
-    const isLink = await (0, promises_1.readlink)(candidatePath)
-        .then(() => true)
-        .catch(() => false);
-    if (!isLink) {
+    const rawTarget = await (0, promises_1.readlink)(candidatePath).catch(() => null);
+    if (rawTarget === null) {
         return false;
     }
+    const targetExists = await (0, promises_1.stat)(candidatePath)
+        .then(() => true)
+        .catch(() => false);
+    if (!targetExists) {
+        return false;
+    }
+    const resolvedRoot = await (0, promises_1.realpath)(vaultRoot).catch(() => (0, node_path_1.resolve)(vaultRoot));
     const resolved = await (0, promises_1.realpath)(candidatePath).catch(() => null);
-    const resolvedRoot = await (0, promises_1.realpath)(vaultRoot).catch(() => vaultRoot);
-    return resolved !== null && isInsideVault(resolved, resolvedRoot);
+    if (resolved !== null && isInsideVault(resolved, resolvedRoot)) {
+        return true;
+    }
+    // Also check immediate link target so a vault entry that itself symlinks to an external repo counts as managed.
+    const realParent = await (0, promises_1.realpath)((0, node_path_1.dirname)(candidatePath)).catch(() => (0, node_path_1.resolve)((0, node_path_1.dirname)(candidatePath)));
+    const immediateTarget = (0, node_path_1.resolve)(realParent, rawTarget);
+    return isInsideVault(immediateTarget, resolvedRoot);
 }
 /** Group candidates by directory name; each group's verdict is one plan row. */
 async function scanSkillVault(input) {
@@ -140,6 +150,36 @@ async function scanSkillVault(input) {
             continue;
         }
         const sorted = [...digested].sort((left, right) => left.path.localeCompare(right.path));
+        const vaultEntryPath = (0, node_path_1.join)(input.vaultRoot, id);
+        const vaultEntryExists = await (0, promises_1.stat)(vaultEntryPath)
+            .then((s) => s.isDirectory())
+            .catch(() => false);
+        if (vaultEntryExists) {
+            const vaultDigest = indexById.get(id)?.digest ?? (await (0, skill_vault_index_service_1.computeSkillVaultDigest)(vaultEntryPath).catch(() => null));
+            if (vaultDigest !== null) {
+                if (sorted.every((candidate) => candidate.digest === vaultDigest)) {
+                    items.push(managedItem(id, { ...sorted[0], path: vaultEntryPath }));
+                    continue;
+                }
+                items.push({
+                    id,
+                    disposition: 'conflict',
+                    originPath: sorted[0].path,
+                    digest: '',
+                    sizeBytes: 0,
+                    mtimeMs: sorted[0].mtimeMs,
+                    mergePaths: [],
+                    conflicts: sorted.map((candidate) => ({
+                        id: candidate.id,
+                        path: candidate.path,
+                        digest: candidate.digest,
+                        mtimeMs: candidate.mtimeMs,
+                        sizeBytes: 0
+                    }))
+                });
+                continue;
+            }
+        }
         const distinctDigests = new Set(sorted.map((candidate) => candidate.digest));
         if (distinctDigests.size > 1) {
             items.push({

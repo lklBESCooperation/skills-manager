@@ -2,6 +2,7 @@ import { homedir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  AuditFixInputSchema,
   PackIdInputSchema,
   PackImportInputSchema,
   PackModeInputSchema,
@@ -197,6 +198,17 @@ export default function activate(orca: OrcaWorkerLike): () => void {
           ? PackScopeInputSchema.parse(rawInput).scope
           : undefined
       return service.runAudit(scope)
+    })
+  )
+
+  disposables.push(
+    orca.panels.handle(SKILL_BRIDGE_METHODS.auditFix, async (rawInput) => {
+      const parsed = rawInput === undefined ? {} : AuditFixInputSchema.parse(rawInput)
+      const result = await service.fixAuditFindings(parsed)
+      if (result.fixedPaths.length > 0) {
+        broadcastSkillsChanged(parsed.scope ?? 'user', [])
+      }
+      return result
     })
   )
 

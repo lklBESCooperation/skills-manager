@@ -37,7 +37,8 @@ export const SKILL_BRIDGE_METHODS = {
   packsRollback: 'skills.packs.rollback',
   packsExport: 'skills.packs.export',
   packsImport: 'skills.packs.import',
-  auditRun: 'skills.audit.run'
+  auditRun: 'skills.audit.run',
+  auditFix: 'skills.audit.fix'
 } as const
 
 export const SKILL_BRIDGE_EVENTS = {
@@ -66,7 +67,11 @@ export type AgentRegistrySummaryItem = {
   capability: 'managed' | 'discovery-only' | 'delegate' | 'unsupported'
   readsCanonical: boolean
   delegatesTo?: AgentId
+  detected?: boolean
+  enabled?: boolean
 }
+
+export type SkillGroupKind = 'repo' | 'parent-dir'
 
 export type ManagedSkillViewItem = {
   /** Stable unique row key (`${scope}:${id}`). */
@@ -76,6 +81,9 @@ export type ManagedSkillViewItem = {
   description: string | null
   sourceKind: ManagedSkillSourceKind
   scope: SkillScopeKind
+  groupKind: SkillGroupKind
+  groupKey: string
+  groupLabel: string
   tags: string[]
   author: string | null
   copyMode: boolean
@@ -94,6 +102,9 @@ export type AdoptableSkillViewItem = {
   name: string
   description: string | null
   scope: SkillScopeKind
+  groupKind: SkillGroupKind
+  groupKey: string
+  groupLabel: string
   disposition: 'adoptable' | 'conflict'
   digest: string
   originPath: string
@@ -282,3 +293,19 @@ export type PluginsRescanOutput = {
 }
 
 export type AuditRunOutput = SkillAuditReport
+
+export const AuditFixInputSchema = z
+  .object({
+    scope: z.enum(['user', 'project']).optional(),
+    kinds: z.array(z.enum(['orphan-symlink', 'readonly-plugin-exposure'])).optional(),
+    paths: z.array(z.string().min(1)).optional()
+  })
+  .strict()
+
+export type AuditFixInput = z.infer<typeof AuditFixInputSchema>
+
+export type AuditFixOutput = {
+  fixedPaths: string[]
+  skipped: { path: string; reason: string }[]
+  report: SkillAuditReport
+}

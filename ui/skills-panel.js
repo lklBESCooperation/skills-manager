@@ -19875,7 +19875,8 @@ var SKILL_BRIDGE_METHODS = {
   packsRollback: "skills.packs.rollback",
   packsExport: "skills.packs.export",
   packsImport: "skills.packs.import",
-  auditRun: "skills.audit.run"
+  auditRun: "skills.audit.run",
+  auditFix: "skills.audit.fix"
 };
 var SKILL_BRIDGE_EVENTS = {
   skillsChanged: "skills.changed",
@@ -19927,6 +19928,11 @@ var PackImportInputSchema = external_exports.object({
   scope: external_exports.enum(["user", "project"]),
   bundle: SkillPackExportBundleSchema,
   conflictStrategy: external_exports.enum(["overwrite", "rename", "reject"]).optional()
+}).strict();
+var AuditFixInputSchema = external_exports.object({
+  scope: external_exports.enum(["user", "project"]).optional(),
+  kinds: external_exports.array(external_exports.enum(["orphan-symlink", "readonly-plugin-exposure"])).optional(),
+  paths: external_exports.array(external_exports.string().min(1)).optional()
 }).strict();
 
 // src/ui/bridge-client.ts

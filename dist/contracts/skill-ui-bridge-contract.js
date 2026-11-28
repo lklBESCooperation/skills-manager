@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PackImportInputSchema = exports.PackRollbackInputSchema = exports.PackModeInputSchema = exports.PackIdInputSchema = exports.PackSaveInputSchema = exports.PackSaveCurrentInputSchema = exports.PackScopeInputSchema = exports.SkillAdoptInputSchema = exports.SkillMutateInputSchema = exports.SkillAgentMatrixInputSchema = exports.SKILL_BRIDGE_EVENTS = exports.SKILL_BRIDGE_METHODS = void 0;
+exports.AuditFixInputSchema = exports.PackImportInputSchema = exports.PackRollbackInputSchema = exports.PackModeInputSchema = exports.PackIdInputSchema = exports.PackSaveInputSchema = exports.PackSaveCurrentInputSchema = exports.PackScopeInputSchema = exports.SkillAdoptInputSchema = exports.SkillMutateInputSchema = exports.SkillAgentMatrixInputSchema = exports.SKILL_BRIDGE_EVENTS = exports.SKILL_BRIDGE_METHODS = void 0;
 const zod_1 = require("zod");
 const skill_pack_contract_1 = require("./skill-pack-contract");
 const tui_agent_1 = require("./tui-agent");
@@ -20,7 +20,8 @@ exports.SKILL_BRIDGE_METHODS = {
     packsRollback: 'skills.packs.rollback',
     packsExport: 'skills.packs.export',
     packsImport: 'skills.packs.import',
-    auditRun: 'skills.audit.run'
+    auditRun: 'skills.audit.run',
+    auditFix: 'skills.audit.fix'
 };
 exports.SKILL_BRIDGE_EVENTS = {
     skillsChanged: 'skills.changed',
@@ -91,5 +92,12 @@ exports.PackImportInputSchema = zod_1.z
     scope: zod_1.z.enum(['user', 'project']),
     bundle: skill_pack_contract_1.SkillPackExportBundleSchema,
     conflictStrategy: zod_1.z.enum(['overwrite', 'rename', 'reject']).optional()
+})
+    .strict();
+exports.AuditFixInputSchema = zod_1.z
+    .object({
+    scope: zod_1.z.enum(['user', 'project']).optional(),
+    kinds: zod_1.z.array(zod_1.z.enum(['orphan-symlink', 'readonly-plugin-exposure'])).optional(),
+    paths: zod_1.z.array(zod_1.z.string().min(1)).optional()
 })
     .strict();

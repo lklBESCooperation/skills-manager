@@ -170,4 +170,34 @@ describe('scanSkillVault attribution', () => {
       rightSkillTime.getTime()
     ])
   })
+
+  it('treats vault-symlinked external skills and same-digest unlinked copies as managed rather than adoptable', async () => {
+    const externalRepoSkill = await writeSkill(
+      join(roots[0], 'external-repo', 'ext-skill'),
+      'ext-skill'
+    )
+    await mkdir(vaultRoot, { recursive: true })
+    const vaultEntry = join(vaultRoot, 'ext-skill')
+    await symlink(externalRepoSkill, vaultEntry, process.platform === 'win32' ? 'junction' : 'dir')
+
+    const claudeLink = join(claudeSkills, 'ext-skill')
+    await symlink(vaultEntry, claudeLink, process.platform === 'win32' ? 'junction' : 'dir')
+
+    const unlinkedSameCopy = await writeSkill(join(codexSkills, 'ext-skill'), 'ext-skill')
+
+    const plan = await scan([claudeLink, unlinkedSameCopy])
+    expect(plan.counts.adoptable).toBe(0)
+    expect(plan.counts.managed).toBe(1)
+    expect(plan.items[0]?.disposition).toBe('managed')
+
+    // Unlinked copy already in vaultRoot (no symlinks anywhere) with same digest is also managed, not adoptable.
+    await writeIdenticalSkill(join(vaultRoot, 'already-vaulted'), 'already-vaulted')
+    const leftoverCopy = await writeIdenticalSkill(
+      join(codexSkills, 'already-vaulted'),
+      'already-vaulted'
+    )
+    const planLeftover = await scan([leftoverCopy])
+    expect(planLeftover.counts.adoptable).toBe(0)
+    expect(planLeftover.counts.managed).toBe(1)
+  })
 })
