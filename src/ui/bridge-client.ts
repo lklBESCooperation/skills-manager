@@ -12,6 +12,8 @@ import {
   type QuickPanelSnapshotOutput,
   type SkillAdoptInput,
   type SkillAdoptOutput,
+  type SkillAgentMatrixInput,
+  type SkillAgentMatrixOutput,
   type SkillMutateInput,
   type SkillMutateOutput,
   type SkillsChangedPayload,
@@ -72,6 +74,13 @@ export const bridgeClient = {
 
   rescanPlugins(): Promise<PluginsRescanOutput> {
     return getOrca().plugin.request<PluginsRescanOutput>(SKILL_BRIDGE_METHODS.pluginsRescan)
+  },
+
+  getSkillAgentMatrix(input: SkillAgentMatrixInput): Promise<SkillAgentMatrixOutput> {
+    return getOrca().plugin.request<SkillAgentMatrixOutput>(
+      SKILL_BRIDGE_METHODS.skillAgentMatrix,
+      input
+    )
   },
 
   mutateEnablement(input: SkillMutateInput): Promise<SkillMutateOutput> {

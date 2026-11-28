@@ -19973,6 +19973,12 @@ var bridgeClient = {
   rescanPlugins() {
     return getOrca().plugin.request(SKILL_BRIDGE_METHODS.pluginsRescan);
   },
+  getSkillAgentMatrix(input2) {
+    return getOrca().plugin.request(
+      SKILL_BRIDGE_METHODS.skillAgentMatrix,
+      input2
+    );
+  },
   mutateEnablement(input2) {
     return getOrca().plugin.request(
       SKILL_BRIDGE_METHODS.enablementMutate,

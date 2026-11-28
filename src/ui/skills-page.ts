@@ -6,6 +6,7 @@ import type {
   SkillMutateOutput,
   WorkbenchSnapshotOutput
 } from '../contracts/skill-ui-bridge-contract'
+import { AgentMatrixCache } from './agent-matrix-cache'
 import { bridgeClient, formatBridgeError } from './bridge-client'
 import { createSwitchControl, el, replaceContent } from './dom-helpers'
 import {
@@ -73,6 +74,7 @@ export function mountSkillsWorkbench(): void {
   const expandedAgents = new Set<string>()
   const expandedDescriptions = new Set<string>()
   const matrixFilterByRow = new Map<string, MatrixFilter>()
+  const agentMatrixCache = new AgentMatrixCache()
   let bulkBusy = false
   let adoptBusy = false
   let searchInputRef: HTMLInputElement | null = null
@@ -92,6 +94,22 @@ export function mountSkillsWorkbench(): void {
   const getAgentMap = (): Map<string, AgentRegistrySummaryItem> =>
     new Map((snapshot?.agentRegistry ?? []).map((a) => [a.id, a]))
 
+  const fetchSkillAgentMatrix = (item: ManagedSkillViewItem): Promise<void> =>
+    agentMatrixCache.load(
+      item,
+      (input) => bridgeClient.getSkillAgentMatrix(input),
+      () => renderInstalledSectionsOnly(),
+      formatBridgeError
+    )
+
+  const refreshExpandedAgentMatrices = (items: readonly ManagedSkillViewItem[]): void => {
+    for (const item of items) {
+      if (expandedAgents.has(item.rowKey) && !agentMatrixCache.resolve(item)) {
+        void fetchSkillAgentMatrix(item)
+      }
+    }
+  }
+
   const switchTab = (next: TabId): void => {
     activeTab = next
     for (const btn of tabButtons) {
@@ -110,9 +128,12 @@ export function mountSkillsWorkbench(): void {
       loadError = null
       renderAll()
     }
+    let refreshedSnapshot: WorkbenchSnapshotOutput | null = null
     try {
       const next = await bridgeClient.getWorkbenchSnapshot()
+      agentMatrixCache.invalidateAll()
       snapshot = next
+      refreshedSnapshot = next
       loadError = null
       if (!targetScopeInitialized) {
         targetWriteScope = next.activeWorkspace.isLocalDirectoryAvailable ? 'project' : 'user'
@@ -131,6 +152,9 @@ export function mountSkillsWorkbench(): void {
       loading = false
       refreshing = false
       renderAll()
+    }
+    if (refreshedSnapshot) {
+      refreshExpandedAgentMatrices(refreshedSnapshot.managedSkills)
     }
   }
 
@@ -264,9 +288,15 @@ export function mountSkillsWorkbench(): void {
     } finally {
       for (const k of rowKeySet) {
         pendingRowKeys.delete(k)
+        agentMatrixCache.invalidateRow(k)
       }
       bulkBusy = false
       renderAll()
+      if (snapshot) {
+        refreshExpandedAgentMatrices(
+          snapshot.managedSkills.filter((item) => rowKeySet.has(item.rowKey))
+        )
+      }
     }
   }
 
@@ -298,7 +328,7 @@ export function mountSkillsWorkbench(): void {
     } catch (error) {
       actionAlert = {
         kind: 'error',
-        message: `批量 Adopt 纳管失败：${formatBridgeError(error)}`,
+        message: `批量纳管失败：${formatBridgeError(error)}`,
         retry: () => void runBatchAdopt(items)
       }
     } finally {
@@ -316,8 +346,9 @@ export function mountSkillsWorkbench(): void {
     const isMatrixOpen = expandedAgents.has(item.rowKey)
     const isDescExpanded = expandedDescriptions.has(item.rowKey)
     const matrixFilter = matrixFilterByRow.get(item.rowKey) ?? 'all'
+    const resolvedMatrix = agentMatrixCache.resolve(item)
 
-    const enabledAgents = Object.entries(item.agents ?? {})
+    const enabledAgents = Object.entries(resolvedMatrix?.agents ?? {})
       .filter(([, enabled]) => Boolean(enabled))
       .map(([agentId]) => agentMap.get(agentId)?.displayName ?? agentId)
 
@@ -471,10 +502,15 @@ export function mountSkillsWorkbench(): void {
             onClick: () => {
               if (isMatrixOpen) {
                 expandedAgents.delete(item.rowKey)
+                renderInstalledSectionsOnly()
               } else {
                 expandedAgents.add(item.rowKey)
+                if (!resolvedMatrix && !agentMatrixCache.isLoading(item.rowKey)) {
+                  void fetchSkillAgentMatrix(item)
+                } else {
+                  renderInstalledSectionsOnly()
+                }
               }
-              renderInstalledTab()
             }
           },
           isMatrixOpen ? '收起 Agent 状态 ▲' : '查看全部 Agent 状态 ▼'
@@ -483,101 +519,158 @@ export function mountSkillsWorkbench(): void {
     )
 
     if (isMatrixOpen && snapshot) {
-      const filteredAgents = snapshot.agentRegistry.filter((agent) => {
-        const detail = item.agentDetails?.[agent.id]
-        const isUnsupported = agent.capability === 'unsupported' || detail?.origin === 'unsupported'
-        const isEnabled = Boolean(item.agents?.[agent.id])
-        if (matrixFilter === 'enabled') return !isUnsupported && isEnabled
-        if (matrixFilter === 'disabled') return !isUnsupported && !isEnabled
-        if (matrixFilter === 'unsupported') return isUnsupported
-        return true
-      })
+      const isMatrixLoading = agentMatrixCache.isLoading(item.rowKey)
+      const matrixError = agentMatrixCache.getError(item.rowKey)
 
-      const originLabel = (agent: AgentRegistrySummaryItem): string => {
-        const detail = item.agentDetails?.[agent.id]
-        if (!detail || detail.origin === 'unsupported' || agent.capability === 'unsupported') {
-          return '暂不支持'
-        }
-        const readMode = agent.delegatesTo
-          ? `委托 ${agentMap.get(agent.delegatesTo)?.displayName ?? agent.delegatesTo}`
-          : agent.readsCanonical
-            ? '读取 .agents/skills'
-            : '独立目录'
-        if (detail.origin === 'borrowed-lock') {
-          const fromName = detail.borrowedFrom
-            ? agentMap.get(detail.borrowedFrom)?.displayName ?? detail.borrowedFrom
-            : '其他 Agent'
-          return `借读自 ${fromName}（锁定）`
-        }
-        if (detail.origin === 'agent-override') return `${readMode} · Agent 独立覆盖`
-        if (detail.origin === 'project') return `${readMode} · 工作区覆盖`
-        return `${readMode} · 全局默认`
-      }
-
-      card.appendChild(
-        el(
-          'div',
-          { className: 'sm-matrix' },
-          el(
-            'div',
-            { className: 'sm-matrix-toolbar' },
-            el('strong', { className: 'sm-field-label' }, `全部 ${snapshot.agentRegistry.length} 个 Agent 生效明细`),
+      if (!resolvedMatrix) {
+        if (isMatrixLoading) {
+          card.appendChild(
             el(
               'div',
-              { className: 'sm-tabs' },
-              ...(
-                [
-                  ['all', '全部'],
-                  ['enabled', '已启用'],
-                  ['disabled', '已停用'],
-                  ['unsupported', '不支持']
-                ] as const
-              ).map(([key, label]) =>
+              { className: 'sm-matrix' },
+              el('div', { className: 'sm-subtitle' }, '正在加载全部 Agent 状态…')
+            )
+          )
+        } else if (matrixError) {
+          card.appendChild(
+            el(
+              'div',
+              { className: 'sm-matrix' },
+              el(
+                'div',
+                { className: 'sm-banner sm-banner-error' },
+                el('span', undefined, `加载 Agent 状态失败：${matrixError}`),
                 el(
                   'button',
                   {
                     type: 'button',
-                    className: 'sm-tab',
-                    'aria-selected': String(matrixFilter === key),
-                    onClick: () => {
-                      matrixFilterByRow.set(item.rowKey, key)
-                      renderInstalledTab()
-                    }
+                    className: 'sm-btn sm-btn-sm',
+                    onClick: () => void fetchSkillAgentMatrix(item)
                   },
-                  label
+                  '重试'
                 )
               )
             )
-          ),
-          el(
-            'div',
-            { className: 'sm-matrix-grid' },
-            ...filteredAgents.map((agent) => {
-              const detail = item.agentDetails?.[agent.id]
-              const unsupported =
-                agent.capability === 'unsupported' || detail?.origin === 'unsupported'
-              const on = !unsupported && Boolean(item.agents?.[agent.id])
-              return el(
+          )
+        } else {
+          card.appendChild(
+            el(
+              'div',
+              { className: 'sm-matrix' },
+              el(
                 'div',
-                { className: 'sm-agent-cell' },
+                { className: 'sm-matrix-toolbar' },
+                el('span', { className: 'sm-subtitle' }, '暂未加载该技能的 Agent 状态矩阵'),
                 el(
-                  'div',
-                  { className: 'sm-agent-cell-left' },
-                  el('span', { className: 'sm-agent-cell-name' }, agent.displayName),
-                  el('span', { className: 'sm-agent-cell-sub' }, originLabel(agent))
-                ),
-                el(
-                  'span',
+                  'button',
                   {
-                    className: `sm-badge ${unsupported ? '' : on ? 'sm-badge-success' : ''}`
+                    type: 'button',
+                    className: 'sm-btn sm-btn-sm',
+                    onClick: () => void fetchSkillAgentMatrix(item)
                   },
-                  unsupported ? '不支持' : on ? '已启用' : '已停用'
+                  '加载 Agent 状态'
                 )
               )
-            })
+            )
+          )
+        }
+      } else {
+        const filteredAgents = snapshot.agentRegistry.filter((agent) => {
+          const detail = resolvedMatrix.agentDetails[agent.id]
+          const isUnsupported = agent.capability === 'unsupported' || detail?.origin === 'unsupported'
+          const isEnabled = Boolean(resolvedMatrix.agents[agent.id])
+          if (matrixFilter === 'enabled') return !isUnsupported && isEnabled
+          if (matrixFilter === 'disabled') return !isUnsupported && !isEnabled
+          if (matrixFilter === 'unsupported') return isUnsupported
+          return true
+        })
+
+        const originLabel = (agent: AgentRegistrySummaryItem): string => {
+          const detail = resolvedMatrix.agentDetails[agent.id]
+          if (!detail || detail.origin === 'unsupported' || agent.capability === 'unsupported') {
+            return '暂不支持'
+          }
+          const readMode = agent.delegatesTo
+            ? `委托 ${agentMap.get(agent.delegatesTo)?.displayName ?? agent.delegatesTo}`
+            : agent.readsCanonical
+              ? '读取 .agents/skills'
+              : '独立目录'
+          if (detail.origin === 'borrowed-lock') {
+            const fromName = detail.borrowedFrom
+              ? agentMap.get(detail.borrowedFrom)?.displayName ?? detail.borrowedFrom
+              : '其他 Agent'
+            return `借读自 ${fromName}（锁定）`
+          }
+          if (detail.origin === 'agent-override') return `${readMode} · Agent 独立覆盖`
+          if (detail.origin === 'project') return `${readMode} · 工作区覆盖`
+          return `${readMode} · 全局默认`
+        }
+
+        card.appendChild(
+          el(
+            'div',
+            { className: 'sm-matrix' },
+            el(
+              'div',
+              { className: 'sm-matrix-toolbar' },
+              el('strong', { className: 'sm-field-label' }, `全部 ${snapshot.agentRegistry.length} 个 Agent 生效明细`),
+              el(
+                'div',
+                { className: 'sm-tabs' },
+                ...(
+                  [
+                    ['all', '全部'],
+                    ['enabled', '已启用'],
+                    ['disabled', '已停用'],
+                    ['unsupported', '不支持']
+                  ] as const
+                ).map(([key, label]) =>
+                  el(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'sm-tab',
+                      'aria-selected': String(matrixFilter === key),
+                      onClick: () => {
+                        matrixFilterByRow.set(item.rowKey, key)
+                        renderInstalledSectionsOnly()
+                      }
+                    },
+                    label
+                  )
+                )
+              )
+            ),
+            el(
+              'div',
+              { className: 'sm-matrix-grid' },
+              ...filteredAgents.map((agent) => {
+                const detail = resolvedMatrix.agentDetails[agent.id]
+                const unsupported =
+                  agent.capability === 'unsupported' || detail?.origin === 'unsupported'
+                const on = !unsupported && Boolean(resolvedMatrix.agents[agent.id])
+                return el(
+                  'div',
+                  { className: 'sm-agent-cell' },
+                  el(
+                    'div',
+                    { className: 'sm-agent-cell-left' },
+                    el('span', { className: 'sm-agent-cell-name' }, agent.displayName),
+                    el('span', { className: 'sm-agent-cell-sub' }, originLabel(agent))
+                  ),
+                  el(
+                    'span',
+                    {
+                      className: `sm-badge ${unsupported ? '' : on ? 'sm-badge-success' : ''}`
+                    },
+                    unsupported ? '不支持' : on ? '已启用' : '已停用'
+                  )
+                )
+              })
+            )
           )
         )
-      )
+      }
     }
 
     return card
@@ -1005,7 +1098,7 @@ export function mountSkillsWorkbench(): void {
           el(
             'h2',
             { className: 'sm-section-title' },
-            `待纳管技能 (Adoptable · ${filteredAdoptable.length})`
+            `待纳管技能 (${filteredAdoptable.length})`
           ),
           el(
             'div',
@@ -1023,8 +1116,8 @@ export function mountSkillsWorkbench(): void {
                       )
                   },
                   selectedAdoptItems.length > 0
-                    ? `Adopt 所选 (${selectedAdoptItems.length})`
-                    : `一键全部 Adopt (${adoptableOnly.length})`
+                    ? `纳管所选 (${selectedAdoptItems.length})`
+                    : `一键全部纳管 (${adoptableOnly.length})`
                 )
               : null
           )
@@ -1090,7 +1183,7 @@ export function mountSkillsWorkbench(): void {
                         disabled: adoptBusy,
                         onClick: () => void runBatchAdopt([item])
                       },
-                      'Adopt 纳管'
+                      '纳管'
                     )
                   : null
               )
@@ -1121,7 +1214,7 @@ export function mountSkillsWorkbench(): void {
         el(
           'span',
           undefined,
-          'Plugin Skills 只读区：以下技能由宿主或 Agent 插件自带并托管。为避免破坏插件完整性与更新校验，此处不支持启用/停用开关、编辑、删除或 Adopt 纳管。'
+          'Plugin Skills 只读区：以下技能由宿主或 Agent 插件自带并托管。为避免破坏插件完整性与更新校验，此处不支持启用/停用开关、编辑、删除或纳管。'
         )
       )
     )
@@ -1288,6 +1381,7 @@ export function mountSkillsWorkbench(): void {
   }
 
   refreshBtn.addEventListener('click', () => {
+    agentMatrixCache.invalidateAll()
     void loadSnapshot()
     if (activeTab === 'packs') {
       void packsController.load()
@@ -1296,9 +1390,11 @@ export function mountSkillsWorkbench(): void {
 
   try {
     bridgeClient.onSkillsChanged(() => {
+      agentMatrixCache.invalidateAll()
       void loadSnapshot(true)
     })
     bridgeClient.onContextChanged(() => {
+      agentMatrixCache.invalidateAll()
       targetScopeInitialized = false
       void loadSnapshot(true)
       if (activeTab === 'packs') {

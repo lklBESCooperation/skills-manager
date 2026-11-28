@@ -4,6 +4,81 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// src/ui/agent-matrix-cache.ts
+var AgentMatrixCache = class {
+  entries = /* @__PURE__ */ new Map();
+  loadingKeys = /* @__PURE__ */ new Set();
+  errors = /* @__PURE__ */ new Map();
+  rowGenerations = /* @__PURE__ */ new Map();
+  globalGeneration = 0;
+  resolve(item) {
+    if (item.agents !== void 0 && item.agentDetails !== void 0) {
+      return {
+        agents: item.agents,
+        agentDetails: item.agentDetails
+      };
+    }
+    const cached2 = this.entries.get(item.rowKey);
+    if (!cached2) {
+      return null;
+    }
+    return {
+      agents: item.agents ?? cached2.agents,
+      agentDetails: item.agentDetails ?? cached2.agentDetails
+    };
+  }
+  has(rowKey) {
+    return this.entries.has(rowKey);
+  }
+  isLoading(rowKey) {
+    return this.loadingKeys.has(rowKey);
+  }
+  getError(rowKey) {
+    return this.errors.get(rowKey);
+  }
+  invalidateAll() {
+    this.entries.clear();
+    this.loadingKeys.clear();
+    this.errors.clear();
+    this.rowGenerations.clear();
+    this.globalGeneration += 1;
+  }
+  invalidateRow(rowKey) {
+    this.entries.delete(rowKey);
+    this.loadingKeys.delete(rowKey);
+    this.errors.delete(rowKey);
+    this.rowGenerations.set(rowKey, (this.rowGenerations.get(rowKey) ?? 0) + 1);
+  }
+  async load(item, fetcher, onUpdate, formatError2 = (err) => String(err || "Unknown error")) {
+    if (this.resolve(item) || this.loadingKeys.has(item.rowKey)) {
+      return;
+    }
+    const expectedGlobalGen = this.globalGeneration;
+    const expectedRowGen = this.rowGenerations.get(item.rowKey) ?? 0;
+    const isCurrent = () => this.globalGeneration === expectedGlobalGen && (this.rowGenerations.get(item.rowKey) ?? 0) === expectedRowGen;
+    this.loadingKeys.add(item.rowKey);
+    this.errors.delete(item.rowKey);
+    onUpdate();
+    try {
+      const matrix = await fetcher({ skillId: item.id, scope: item.scope });
+      if (!isCurrent()) {
+        return;
+      }
+      this.entries.set(matrix.rowKey || item.rowKey, matrix);
+    } catch (error62) {
+      if (!isCurrent()) {
+        return;
+      }
+      this.errors.set(item.rowKey, formatError2(error62));
+    } finally {
+      if (isCurrent()) {
+        this.loadingKeys.delete(item.rowKey);
+        onUpdate();
+      }
+    }
+  }
+};
+
 // node_modules/.pnpm/zod@4.6.7/node_modules/zod/v4/classic/external.js
 var external_exports = {};
 __export(external_exports, {
@@ -19974,6 +20049,12 @@ var bridgeClient = {
   rescanPlugins() {
     return getOrca().plugin.request(SKILL_BRIDGE_METHODS.pluginsRescan);
   },
+  getSkillAgentMatrix(input2) {
+    return getOrca().plugin.request(
+      SKILL_BRIDGE_METHODS.skillAgentMatrix,
+      input2
+    );
+  },
   mutateEnablement(input2) {
     return getOrca().plugin.request(
       SKILL_BRIDGE_METHODS.enablementMutate,
@@ -21539,7 +21620,7 @@ function createPluginAuditTabController() {
           el(
             "span",
             void 0,
-            "Plugin Skills \u53EA\u8BFB\u533A\uFF1A\u4EE5\u4E0B\u6280\u80FD\u7531\u5BBF\u4E3B\u6216 Agent \u63D2\u4EF6\u81EA\u5E26\u5E76\u6258\u7BA1\u3002\u4E3A\u907F\u514D\u7834\u574F\u63D2\u4EF6\u5B8C\u6574\u6027\u4E0E\u66F4\u65B0\u6821\u9A8C\uFF0C\u6B64\u5904\u4E0D\u652F\u6301\u542F\u7528/\u505C\u7528\u5F00\u5173\u3001\u7F16\u8F91\u3001\u5220\u9664\u6216 Adopt \u7EB3\u7BA1\u3002"
+            "Plugin Skills \u53EA\u8BFB\u533A\uFF1A\u4EE5\u4E0B\u6280\u80FD\u7531\u5BBF\u4E3B\u6216 Agent \u63D2\u4EF6\u81EA\u5E26\u5E76\u6258\u7BA1\u3002\u4E3A\u907F\u514D\u7834\u574F\u63D2\u4EF6\u5B8C\u6574\u6027\u4E0E\u66F4\u65B0\u6821\u9A8C\uFF0C\u6B64\u5904\u4E0D\u652F\u6301\u542F\u7528/\u505C\u7528\u5F00\u5173\u3001\u7F16\u8F91\u3001\u5220\u9664\u6216\u7EB3\u7BA1\u3002"
           )
         )
       );
@@ -21621,6 +21702,7 @@ function mountSkillsWorkbench() {
   const expandedAgents = /* @__PURE__ */ new Set();
   const expandedDescriptions = /* @__PURE__ */ new Set();
   const matrixFilterByRow = /* @__PURE__ */ new Map();
+  const agentMatrixCache = new AgentMatrixCache();
   let bulkBusy = false;
   let adoptBusy = false;
   let searchInputRef = null;
@@ -21635,6 +21717,19 @@ function mountSkillsWorkbench() {
     }, 3200);
   };
   const getAgentMap = () => new Map((snapshot?.agentRegistry ?? []).map((a) => [a.id, a]));
+  const fetchSkillAgentMatrix = (item) => agentMatrixCache.load(
+    item,
+    (input2) => bridgeClient.getSkillAgentMatrix(input2),
+    () => renderInstalledSectionsOnly(),
+    formatBridgeError
+  );
+  const refreshExpandedAgentMatrices = (items) => {
+    for (const item of items) {
+      if (expandedAgents.has(item.rowKey) && !agentMatrixCache.resolve(item)) {
+        void fetchSkillAgentMatrix(item);
+      }
+    }
+  };
   const switchTab = (next) => {
     activeTab = next;
     for (const btn of tabButtons) {
@@ -21652,9 +21747,12 @@ function mountSkillsWorkbench() {
       loadError = null;
       renderAll();
     }
+    let refreshedSnapshot = null;
     try {
       const next = await bridgeClient.getWorkbenchSnapshot();
+      agentMatrixCache.invalidateAll();
       snapshot = next;
+      refreshedSnapshot = next;
       loadError = null;
       if (!targetScopeInitialized) {
         targetWriteScope = next.activeWorkspace.isLocalDirectoryAvailable ? "project" : "user";
@@ -21673,6 +21771,9 @@ function mountSkillsWorkbench() {
       loading = false;
       refreshing = false;
       renderAll();
+    }
+    if (refreshedSnapshot) {
+      refreshExpandedAgentMatrices(refreshedSnapshot.managedSkills);
     }
   };
   const rescanPlugins = async () => {
@@ -21785,9 +21886,15 @@ function mountSkillsWorkbench() {
     } finally {
       for (const k of rowKeySet) {
         pendingRowKeys.delete(k);
+        agentMatrixCache.invalidateRow(k);
       }
       bulkBusy = false;
       renderAll();
+      if (snapshot) {
+        refreshExpandedAgentMatrices(
+          snapshot.managedSkills.filter((item) => rowKeySet.has(item.rowKey))
+        );
+      }
     }
   };
   const runBatchAdopt = async (items) => {
@@ -21816,7 +21923,7 @@ function mountSkillsWorkbench() {
     } catch (error62) {
       actionAlert = {
         kind: "error",
-        message: `\u6279\u91CF Adopt \u7EB3\u7BA1\u5931\u8D25\uFF1A${formatBridgeError(error62)}`,
+        message: `\u6279\u91CF\u7EB3\u7BA1\u5931\u8D25\uFF1A${formatBridgeError(error62)}`,
         retry: () => void runBatchAdopt(items)
       };
     } finally {
@@ -21830,7 +21937,8 @@ function mountSkillsWorkbench() {
     const isMatrixOpen = expandedAgents.has(item.rowKey);
     const isDescExpanded = expandedDescriptions.has(item.rowKey);
     const matrixFilter = matrixFilterByRow.get(item.rowKey) ?? "all";
-    const enabledAgents = Object.entries(item.agents ?? {}).filter(([, enabled]) => Boolean(enabled)).map(([agentId]) => agentMap.get(agentId)?.displayName ?? agentId);
+    const resolvedMatrix = agentMatrixCache.resolve(item);
+    const enabledAgents = Object.entries(resolvedMatrix?.agents ?? {}).filter(([, enabled]) => Boolean(enabled)).map(([agentId]) => agentMap.get(agentId)?.displayName ?? agentId);
     const previewAgents = enabledAgents.slice(0, 4);
     const extraAgentsCount = Math.max(0, enabledAgents.length - previewAgents.length);
     const showInheritBtn = snapshot?.activeWorkspace.isLocalDirectoryAvailable && targetWriteScope === "project" && item.origin === "project";
@@ -21963,10 +22071,15 @@ function mountSkillsWorkbench() {
             onClick: () => {
               if (isMatrixOpen) {
                 expandedAgents.delete(item.rowKey);
+                renderInstalledSectionsOnly();
               } else {
                 expandedAgents.add(item.rowKey);
+                if (!resolvedMatrix && !agentMatrixCache.isLoading(item.rowKey)) {
+                  void fetchSkillAgentMatrix(item);
+                } else {
+                  renderInstalledSectionsOnly();
+                }
               }
-              renderInstalledTab();
             }
           },
           isMatrixOpen ? "\u6536\u8D77 Agent \u72B6\u6001 \u25B2" : "\u67E5\u770B\u5168\u90E8 Agent \u72B6\u6001 \u25BC"
@@ -21974,90 +22087,146 @@ function mountSkillsWorkbench() {
       )
     );
     if (isMatrixOpen && snapshot) {
-      const filteredAgents = snapshot.agentRegistry.filter((agent) => {
-        const detail = item.agentDetails?.[agent.id];
-        const isUnsupported = agent.capability === "unsupported" || detail?.origin === "unsupported";
-        const isEnabled = Boolean(item.agents?.[agent.id]);
-        if (matrixFilter === "enabled") return !isUnsupported && isEnabled;
-        if (matrixFilter === "disabled") return !isUnsupported && !isEnabled;
-        if (matrixFilter === "unsupported") return isUnsupported;
-        return true;
-      });
-      const originLabel = (agent) => {
-        const detail = item.agentDetails?.[agent.id];
-        if (!detail || detail.origin === "unsupported" || agent.capability === "unsupported") {
-          return "\u6682\u4E0D\u652F\u6301";
-        }
-        const readMode = agent.delegatesTo ? `\u59D4\u6258 ${agentMap.get(agent.delegatesTo)?.displayName ?? agent.delegatesTo}` : agent.readsCanonical ? "\u8BFB\u53D6 .agents/skills" : "\u72EC\u7ACB\u76EE\u5F55";
-        if (detail.origin === "borrowed-lock") {
-          const fromName = detail.borrowedFrom ? agentMap.get(detail.borrowedFrom)?.displayName ?? detail.borrowedFrom : "\u5176\u4ED6 Agent";
-          return `\u501F\u8BFB\u81EA ${fromName}\uFF08\u9501\u5B9A\uFF09`;
-        }
-        if (detail.origin === "agent-override") return `${readMode} \xB7 Agent \u72EC\u7ACB\u8986\u76D6`;
-        if (detail.origin === "project") return `${readMode} \xB7 \u5DE5\u4F5C\u533A\u8986\u76D6`;
-        return `${readMode} \xB7 \u5168\u5C40\u9ED8\u8BA4`;
-      };
-      card.appendChild(
-        el(
-          "div",
-          { className: "sm-matrix" },
-          el(
-            "div",
-            { className: "sm-matrix-toolbar" },
-            el("strong", { className: "sm-field-label" }, `\u5168\u90E8 ${snapshot.agentRegistry.length} \u4E2A Agent \u751F\u6548\u660E\u7EC6`),
+      const isMatrixLoading = agentMatrixCache.isLoading(item.rowKey);
+      const matrixError = agentMatrixCache.getError(item.rowKey);
+      if (!resolvedMatrix) {
+        if (isMatrixLoading) {
+          card.appendChild(
             el(
               "div",
-              { className: "sm-tabs" },
-              ...[
-                ["all", "\u5168\u90E8"],
-                ["enabled", "\u5DF2\u542F\u7528"],
-                ["disabled", "\u5DF2\u505C\u7528"],
-                ["unsupported", "\u4E0D\u652F\u6301"]
-              ].map(
-                ([key, label]) => el(
+              { className: "sm-matrix" },
+              el("div", { className: "sm-subtitle" }, "\u6B63\u5728\u52A0\u8F7D\u5168\u90E8 Agent \u72B6\u6001\u2026")
+            )
+          );
+        } else if (matrixError) {
+          card.appendChild(
+            el(
+              "div",
+              { className: "sm-matrix" },
+              el(
+                "div",
+                { className: "sm-banner sm-banner-error" },
+                el("span", void 0, `\u52A0\u8F7D Agent \u72B6\u6001\u5931\u8D25\uFF1A${matrixError}`),
+                el(
                   "button",
                   {
                     type: "button",
-                    className: "sm-tab",
-                    "aria-selected": String(matrixFilter === key),
-                    onClick: () => {
-                      matrixFilterByRow.set(item.rowKey, key);
-                      renderInstalledTab();
-                    }
+                    className: "sm-btn sm-btn-sm",
+                    onClick: () => void fetchSkillAgentMatrix(item)
                   },
-                  label
+                  "\u91CD\u8BD5"
                 )
               )
             )
-          ),
+          );
+        } else {
+          card.appendChild(
+            el(
+              "div",
+              { className: "sm-matrix" },
+              el(
+                "div",
+                { className: "sm-matrix-toolbar" },
+                el("span", { className: "sm-subtitle" }, "\u6682\u672A\u52A0\u8F7D\u8BE5\u6280\u80FD\u7684 Agent \u72B6\u6001\u77E9\u9635"),
+                el(
+                  "button",
+                  {
+                    type: "button",
+                    className: "sm-btn sm-btn-sm",
+                    onClick: () => void fetchSkillAgentMatrix(item)
+                  },
+                  "\u52A0\u8F7D Agent \u72B6\u6001"
+                )
+              )
+            )
+          );
+        }
+      } else {
+        const filteredAgents = snapshot.agentRegistry.filter((agent) => {
+          const detail = resolvedMatrix.agentDetails[agent.id];
+          const isUnsupported = agent.capability === "unsupported" || detail?.origin === "unsupported";
+          const isEnabled = Boolean(resolvedMatrix.agents[agent.id]);
+          if (matrixFilter === "enabled") return !isUnsupported && isEnabled;
+          if (matrixFilter === "disabled") return !isUnsupported && !isEnabled;
+          if (matrixFilter === "unsupported") return isUnsupported;
+          return true;
+        });
+        const originLabel = (agent) => {
+          const detail = resolvedMatrix.agentDetails[agent.id];
+          if (!detail || detail.origin === "unsupported" || agent.capability === "unsupported") {
+            return "\u6682\u4E0D\u652F\u6301";
+          }
+          const readMode = agent.delegatesTo ? `\u59D4\u6258 ${agentMap.get(agent.delegatesTo)?.displayName ?? agent.delegatesTo}` : agent.readsCanonical ? "\u8BFB\u53D6 .agents/skills" : "\u72EC\u7ACB\u76EE\u5F55";
+          if (detail.origin === "borrowed-lock") {
+            const fromName = detail.borrowedFrom ? agentMap.get(detail.borrowedFrom)?.displayName ?? detail.borrowedFrom : "\u5176\u4ED6 Agent";
+            return `\u501F\u8BFB\u81EA ${fromName}\uFF08\u9501\u5B9A\uFF09`;
+          }
+          if (detail.origin === "agent-override") return `${readMode} \xB7 Agent \u72EC\u7ACB\u8986\u76D6`;
+          if (detail.origin === "project") return `${readMode} \xB7 \u5DE5\u4F5C\u533A\u8986\u76D6`;
+          return `${readMode} \xB7 \u5168\u5C40\u9ED8\u8BA4`;
+        };
+        card.appendChild(
           el(
             "div",
-            { className: "sm-matrix-grid" },
-            ...filteredAgents.map((agent) => {
-              const detail = item.agentDetails?.[agent.id];
-              const unsupported = agent.capability === "unsupported" || detail?.origin === "unsupported";
-              const on = !unsupported && Boolean(item.agents?.[agent.id]);
-              return el(
+            { className: "sm-matrix" },
+            el(
+              "div",
+              { className: "sm-matrix-toolbar" },
+              el("strong", { className: "sm-field-label" }, `\u5168\u90E8 ${snapshot.agentRegistry.length} \u4E2A Agent \u751F\u6548\u660E\u7EC6`),
+              el(
                 "div",
-                { className: "sm-agent-cell" },
-                el(
-                  "div",
-                  { className: "sm-agent-cell-left" },
-                  el("span", { className: "sm-agent-cell-name" }, agent.displayName),
-                  el("span", { className: "sm-agent-cell-sub" }, originLabel(agent))
-                ),
-                el(
-                  "span",
-                  {
-                    className: `sm-badge ${unsupported ? "" : on ? "sm-badge-success" : ""}`
-                  },
-                  unsupported ? "\u4E0D\u652F\u6301" : on ? "\u5DF2\u542F\u7528" : "\u5DF2\u505C\u7528"
+                { className: "sm-tabs" },
+                ...[
+                  ["all", "\u5168\u90E8"],
+                  ["enabled", "\u5DF2\u542F\u7528"],
+                  ["disabled", "\u5DF2\u505C\u7528"],
+                  ["unsupported", "\u4E0D\u652F\u6301"]
+                ].map(
+                  ([key, label]) => el(
+                    "button",
+                    {
+                      type: "button",
+                      className: "sm-tab",
+                      "aria-selected": String(matrixFilter === key),
+                      onClick: () => {
+                        matrixFilterByRow.set(item.rowKey, key);
+                        renderInstalledSectionsOnly();
+                      }
+                    },
+                    label
+                  )
                 )
-              );
-            })
+              )
+            ),
+            el(
+              "div",
+              { className: "sm-matrix-grid" },
+              ...filteredAgents.map((agent) => {
+                const detail = resolvedMatrix.agentDetails[agent.id];
+                const unsupported = agent.capability === "unsupported" || detail?.origin === "unsupported";
+                const on = !unsupported && Boolean(resolvedMatrix.agents[agent.id]);
+                return el(
+                  "div",
+                  { className: "sm-agent-cell" },
+                  el(
+                    "div",
+                    { className: "sm-agent-cell-left" },
+                    el("span", { className: "sm-agent-cell-name" }, agent.displayName),
+                    el("span", { className: "sm-agent-cell-sub" }, originLabel(agent))
+                  ),
+                  el(
+                    "span",
+                    {
+                      className: `sm-badge ${unsupported ? "" : on ? "sm-badge-success" : ""}`
+                    },
+                    unsupported ? "\u4E0D\u652F\u6301" : on ? "\u5DF2\u542F\u7528" : "\u5DF2\u505C\u7528"
+                  )
+                );
+              })
+            )
           )
-        )
-      );
+        );
+      }
     }
     return card;
   };
@@ -22443,7 +22612,7 @@ function mountSkillsWorkbench() {
           el(
             "h2",
             { className: "sm-section-title" },
-            `\u5F85\u7EB3\u7BA1\u6280\u80FD (Adoptable \xB7 ${filteredAdoptable.length})`
+            `\u5F85\u7EB3\u7BA1\u6280\u80FD (${filteredAdoptable.length})`
           ),
           el(
             "div",
@@ -22458,7 +22627,7 @@ function mountSkillsWorkbench() {
                   selectedAdoptItems.length > 0 ? selectedAdoptItems : adoptableOnly
                 )
               },
-              selectedAdoptItems.length > 0 ? `Adopt \u6240\u9009 (${selectedAdoptItems.length})` : `\u4E00\u952E\u5168\u90E8 Adopt (${adoptableOnly.length})`
+              selectedAdoptItems.length > 0 ? `\u7EB3\u7BA1\u6240\u9009 (${selectedAdoptItems.length})` : `\u4E00\u952E\u5168\u90E8\u7EB3\u7BA1 (${adoptableOnly.length})`
             ) : null
           )
         )
@@ -22520,7 +22689,7 @@ function mountSkillsWorkbench() {
                     disabled: adoptBusy,
                     onClick: () => void runBatchAdopt([item])
                   },
-                  "Adopt \u7EB3\u7BA1"
+                  "\u7EB3\u7BA1"
                 ) : null
               )
             );
@@ -22548,7 +22717,7 @@ function mountSkillsWorkbench() {
         el(
           "span",
           void 0,
-          "Plugin Skills \u53EA\u8BFB\u533A\uFF1A\u4EE5\u4E0B\u6280\u80FD\u7531\u5BBF\u4E3B\u6216 Agent \u63D2\u4EF6\u81EA\u5E26\u5E76\u6258\u7BA1\u3002\u4E3A\u907F\u514D\u7834\u574F\u63D2\u4EF6\u5B8C\u6574\u6027\u4E0E\u66F4\u65B0\u6821\u9A8C\uFF0C\u6B64\u5904\u4E0D\u652F\u6301\u542F\u7528/\u505C\u7528\u5F00\u5173\u3001\u7F16\u8F91\u3001\u5220\u9664\u6216 Adopt \u7EB3\u7BA1\u3002"
+          "Plugin Skills \u53EA\u8BFB\u533A\uFF1A\u4EE5\u4E0B\u6280\u80FD\u7531\u5BBF\u4E3B\u6216 Agent \u63D2\u4EF6\u81EA\u5E26\u5E76\u6258\u7BA1\u3002\u4E3A\u907F\u514D\u7834\u574F\u63D2\u4EF6\u5B8C\u6574\u6027\u4E0E\u66F4\u65B0\u6821\u9A8C\uFF0C\u6B64\u5904\u4E0D\u652F\u6301\u542F\u7528/\u505C\u7528\u5F00\u5173\u3001\u7F16\u8F91\u3001\u5220\u9664\u6216\u7EB3\u7BA1\u3002"
         )
       )
     );
@@ -22702,6 +22871,7 @@ function mountSkillsWorkbench() {
     });
   }
   refreshBtn.addEventListener("click", () => {
+    agentMatrixCache.invalidateAll();
     void loadSnapshot();
     if (activeTab === "packs") {
       void packsController.load();
@@ -22709,9 +22879,11 @@ function mountSkillsWorkbench() {
   });
   try {
     bridgeClient.onSkillsChanged(() => {
+      agentMatrixCache.invalidateAll();
       void loadSnapshot(true);
     });
     bridgeClient.onContextChanged(() => {
+      agentMatrixCache.invalidateAll();
       targetScopeInitialized = false;
       void loadSnapshot(true);
       if (activeTab === "packs") {
