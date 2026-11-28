@@ -12,6 +12,7 @@ import {
   SKILL_BRIDGE_EVENTS,
   SKILL_BRIDGE_METHODS,
   SkillAdoptInputSchema,
+  SkillAgentMatrixInputSchema,
   SkillMutateInputSchema
 } from '../contracts/skill-ui-bridge-contract'
 import {
@@ -83,6 +84,13 @@ export default function activate(orca: OrcaWorkerLike): () => void {
 
   disposables.push(
     orca.panels.handle(SKILL_BRIDGE_METHODS.panelSnapshot, () => service.getQuickPanelSnapshot())
+  )
+
+  disposables.push(
+    orca.panels.handle(SKILL_BRIDGE_METHODS.skillAgentMatrix, async (rawInput) => {
+      const parsed = SkillAgentMatrixInputSchema.parse(rawInput)
+      return service.getSkillAgentMatrix(parsed)
+    })
   )
 
   disposables.push(

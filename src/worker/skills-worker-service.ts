@@ -29,6 +29,8 @@ import type {
   QuickPanelSnapshotOutput,
   SkillAdoptInput,
   SkillAdoptOutput,
+  SkillAgentMatrixInput,
+  SkillAgentMatrixOutput,
   SkillMutateConflictItem,
   SkillMutateInput,
   SkillMutateOutput,
@@ -69,6 +71,28 @@ import {
 import { isSkillStagingEntryName } from '../vault/staging-marker'
 
 const MAX_SKILL_MD_BYTES = 256 * 1024
+const MAX_SNAPSHOT_DESCRIPTION_CHARS = 300
+
+function truncateDescription(description: string | null): string | null {
+  if (description === null || description.length <= MAX_SNAPSHOT_DESCRIPTION_CHARS) {
+    return description
+  }
+  return `${description.slice(0, MAX_SNAPSHOT_DESCRIPTION_CHARS - 1).trimEnd()}…`
+}
+
+function omitAgentMatrix<T extends { agents?: unknown; agentDetails?: unknown }>(
+  item: T
+): Omit<T, 'agents' | 'agentDetails'> {
+  const { agents: _agents, agentDetails: _details, ...rest } = item
+  return rest
+}
+
+function truncatePluginDescriptions(skills: readonly PluginSkillRecord[]): PluginSkillRecord[] {
+  return skills.map((skill) => ({
+    ...skill,
+    description: truncateDescription(skill.description)
+  }))
+}
 
 export type HostWorkspaceRow = {
   id: string
@@ -287,7 +311,7 @@ export class SkillsWorkerService {
           : {})
       })
       return {
-        pluginSkills: result.skills,
+        pluginSkills: truncatePluginDescriptions(result.skills),
         readonlyRoots: result.readonlyRoots,
         pluginScanError: null
       }
@@ -298,6 +322,38 @@ export class SkillsWorkerService {
         pluginScanError: error instanceof Error ? error.message : String(error)
       }
     }
+  }
+
+  private async resolveWorkspaceSkillIds(
+    ws: string,
+    userSkillIds: readonly string[]
+  ): Promise<{ wsVaultRoot: string; wsVaultIds: Set<string>; wsSkillIds: string[] }> {
+    const userVaultRoot = userSkillVaultRoot(this.options.homeDirectory)
+    const wsVaultRoot = projectSkillVaultRoot(ws)
+    const wsCanonicalRoot = join(ws, '.agents', 'skills')
+    const [wsVaultIds, rawWsSkillIds] = await Promise.all([
+      listDirectSubdirNames(wsVaultRoot),
+      listInstalledSkillIds(wsVaultRoot, wsCanonicalRoot)
+    ])
+    const userIdSet = new Set(userSkillIds)
+    const wsSkillIds: string[] = []
+    for (const id of rawWsSkillIds) {
+      if (wsVaultIds.has(id)) {
+        wsSkillIds.push(id)
+        continue
+      }
+      // Skip canonical symlinks that point into the user vault (workspace placement of user skill).
+      if (
+        userIdSet.has(id) &&
+        (await isSymlinkIntoRoot(join(wsCanonicalRoot, id), userVaultRoot))
+      ) {
+        continue
+      }
+      if (!userIdSet.has(id)) {
+        wsSkillIds.push(id)
+      }
+    }
+    return { wsVaultRoot, wsVaultIds, wsSkillIds }
   }
 
   private async collectManagedAndAdoptable(input: {
@@ -343,33 +399,15 @@ export class SkillsWorkerService {
     let wsVaultRoot = ''
 
     if (ws) {
-      wsVaultRoot = projectSkillVaultRoot(ws)
       const wsIndexPath = projectSkillVaultIndexPath(ws)
-      const wsCanonicalRoot = join(ws, '.agents', 'skills')
-      const [loadedWsIndex, loadedWsVaultIds, rawWsSkillIds] = await Promise.all([
+      const [loadedWsIndex, resolvedWs] = await Promise.all([
         readSkillVaultIndexWithLegacyFallback(wsIndexPath, legacyProjectSkillVaultIndexPath(ws)),
-        listDirectSubdirNames(wsVaultRoot),
-        listInstalledSkillIds(wsVaultRoot, wsCanonicalRoot)
+        this.resolveWorkspaceSkillIds(ws, userSkillIds)
       ])
       wsIndex = loadedWsIndex
-      wsVaultIds = loadedWsVaultIds
-      const userIdSet = new Set(userSkillIds)
-      for (const id of rawWsSkillIds) {
-        if (wsVaultIds.has(id)) {
-          wsSkillIds.push(id)
-          continue
-        }
-        // Skip canonical symlinks that point into the user vault (workspace placement of user skill).
-        if (
-          userIdSet.has(id) &&
-          (await isSymlinkIntoRoot(join(wsCanonicalRoot, id), userVaultRoot))
-        ) {
-          continue
-        }
-        if (!userIdSet.has(id)) {
-          wsSkillIds.push(id)
-        }
-      }
+      wsVaultRoot = resolvedWs.wsVaultRoot
+      wsVaultIds = resolvedWs.wsVaultIds
+      wsSkillIds = resolvedWs.wsSkillIds
     }
 
     const userResolution = resolveEffectiveSkills({
@@ -453,7 +491,7 @@ export class SkillsWorkerService {
           rowKey: `${params.scope}:${id}`,
           id,
           name,
-          description,
+          description: truncateDescription(description),
           sourceKind,
           scope: params.scope,
           tags: entry?.tags ?? [],
@@ -525,7 +563,7 @@ export class SkillsWorkerService {
             rowKey: `${scope}:${item.id}`,
             id: item.id,
             name: summary.name ?? item.id,
-            description: summary.description,
+            description: truncateDescription(summary.description),
             scope,
             disposition: item.disposition,
             digest: item.digest,
@@ -567,7 +605,7 @@ export class SkillsWorkerService {
         isLocalDirectoryAvailable: activeWorkspace.isLocalDirectoryAvailable
       },
       agentRegistry: this.agentRegistry,
-      managedSkills,
+      managedSkills: managedSkills.map(omitAgentMatrix),
       adoptableSkills,
       pluginSkills,
       pluginScanError,
@@ -593,10 +631,69 @@ export class SkillsWorkerService {
         workspaceName: activeWorkspace.workspaceName,
         isLocalDirectoryAvailable: activeWorkspace.isLocalDirectoryAvailable
       },
-      managedSkills: managedSkills.map(({ agents: _agents, agentDetails: _details, ...rest }) => rest),
+      managedSkills: managedSkills.map(omitAgentMatrix),
       pluginSkillCount: pluginSkills.length,
       adoptableCount: adoptableSkills.length,
       generatedAt: Date.now()
+    }
+  }
+
+  async getSkillAgentMatrix(input: SkillAgentMatrixInput): Promise<SkillAgentMatrixOutput> {
+    const activeWorkspace = await this.resolveActiveWorkspace()
+    const ws = activeWorkspace.workspaceDirectory
+    if (input.scope === 'workspace' && !ws) {
+      throw new Error('skill-enablement-workspace-required')
+    }
+
+    const home = this.options.homeDirectory
+    const userVaultRoot = userSkillVaultRoot(home)
+    const userIndexPath = userSkillVaultIndexPath(home)
+    const userCanonicalRoot = join(home, '.agents', 'skills')
+    const userSkillIds = await listInstalledSkillIds(userVaultRoot, userCanonicalRoot)
+
+    if (input.scope === 'user') {
+      if (!userSkillIds.includes(input.skillId)) {
+        throw new Error(`skill-not-found: user:${input.skillId}`)
+      }
+    } else if (ws) {
+      const { wsSkillIds } = await this.resolveWorkspaceSkillIds(ws, userSkillIds)
+      if (!wsSkillIds.includes(input.skillId)) {
+        throw new Error(`skill-not-found: workspace:${input.skillId}`)
+      }
+    }
+
+    const userState = await readSkillEnablementState({
+      runtime: {
+        scope: ws ? 'workspace' : 'global',
+        homeDirectory: home,
+        ...(ws ? { workspaceDirectory: ws } : {}),
+        vaultRoot: userVaultRoot,
+        indexPath: userIndexPath,
+        stateDirectory: join(ws ?? home, '.pmstudio', 'state'),
+        detectedProviders: [],
+        fileIO: this.fileIO
+      },
+      includeAgents: false
+    })
+
+    const resolutionMap = resolveEffectiveSkills({
+      installed: [input.skillId],
+      userDefaults: userState.userDefaults,
+      projectOverrides: ws ? userState.projectOverrides : {},
+      userAgentOverrides: userState.userAgentOverrides,
+      projectAgentOverrides: ws ? userState.projectAgentOverrides : {},
+      scope: ws ? 'workspace' : 'global',
+      includeAgents: true
+    })
+    const resolution = resolutionMap.get(input.skillId)
+    if (!resolution) {
+      throw new Error(`skill-not-found: ${input.scope}:${input.skillId}`)
+    }
+
+    return {
+      rowKey: `${input.scope}:${input.skillId}`,
+      agents: resolution.agents ?? {},
+      agentDetails: resolution.agentDetails ?? {}
     }
   }
 
@@ -613,7 +710,7 @@ export class SkillsWorkerService {
         : {})
     })
     return {
-      pluginSkills: result.skills,
+      pluginSkills: truncatePluginDescriptions(result.skills),
       pluginScanError: null
     }
   }
@@ -787,7 +884,9 @@ export class SkillsWorkerService {
       includeAdoptable: false
     })
     const requestedSet = new Set(input.skillIds)
-    const updatedSkills = refreshed.managedSkills.filter((item) => requestedSet.has(item.id))
+    const updatedSkills = refreshed.managedSkills
+      .filter((item) => requestedSet.has(item.id))
+      .map(omitAgentMatrix)
 
     const hasIssues = conflicts.length > 0 || readonlyBlocked.length > 0 || failed.length > 0
     if (failed.length > 0 && updatedSkills.length === 0) {
